@@ -608,6 +608,7 @@ pub fn scene(state: &State, assets: &Assets, now: OffsetDateTime) -> Scene {
     }
     if let Some(
         overlay @ (Overlay::Options { .. }
+        | Overlay::UpdateConfirmation { .. }
         | Overlay::Delete { .. }
         | Overlay::BackgroundOptions { .. }
         | Overlay::BackgroundDelete { .. }
@@ -642,6 +643,7 @@ pub fn scene(state: &State, assets: &Assets, now: OffsetDateTime) -> Scene {
             out.fade(start, (opened.elapsed().as_secs_f32() / 0.12).min(1.), 1.);
         }
         match overlay {
+            Overlay::UpdateConfirmation { .. } => update_confirmation(&mut out, state, assets),
             Overlay::WidgetOptions { cell } => widget_menu(&mut out, state, assets, *cell, false),
             Overlay::WidgetCatalog { cell, .. } => {
                 widget_menu(&mut out, state, assets, *cell, true)
@@ -947,6 +949,44 @@ pub fn initial_drawer_labels(state: &State, assets: &Assets) -> Vec<Draw> {
         .take(4 * APPS_COLUMNS)
         .map(|app| drawer_label(assets, app, Rect::new(0., 0., 270., FACE_HEIGHT)))
         .collect()
+}
+
+/// The app options menu's labels and icons, for idle preparation. Text runs are cached by
+/// layout size, not position, so these serve the menu beside any card.
+pub fn options_menu_draws(state: &State, assets: &Assets) -> Vec<Draw> {
+    let language = state.preferences.language;
+    let mut out = Scene::new();
+    let label_style = text(20.8, 600, -0.02);
+    let label_height = label_style.size * label_style.line_height;
+    for key in [
+        "open",
+        "removeFavorite",
+        "addFavorite",
+        "showApp",
+        "hideApp",
+        "move",
+        "deleteApp",
+    ] {
+        out.text(
+            language.t(key),
+            Rect::new(0., 0., 520. - 32. - 88., label_height),
+            label_style,
+            WHITE,
+            false,
+        );
+    }
+    for icon in [
+        "arrow",
+        "heart",
+        "heart-filled",
+        "eye",
+        "eye-off",
+        "left",
+        "circle-minus",
+    ] {
+        out.icon(assets, icon, Rect::new(0., 0., 21.6, 21.6), WHITE);
+    }
+    out.draw
 }
 
 /// Returns whether the card is focused (see batch_cards).
@@ -4731,6 +4771,75 @@ fn options(out: &mut Scene, state: &State, assets: &Assets, id: &str, anchor: Op
             (opened.elapsed().as_secs_f32() / 0.12).min(1.),
             1.,
         );
+    }
+}
+
+fn update_confirmation(out: &mut Scene, state: &State, assets: &Assets) {
+    let language = state.preferences.language;
+    let width = 880.;
+    let style = text(24., 500, -0.02).leading(1.5);
+    let keys = [
+        "homeChooserUpgradeDefault",
+        "homeChooserUpgradeDisable",
+        "homeChooserUpgradeInstall",
+        "homeChooserUpgradeSelect",
+    ];
+    let heights =
+        keys.map(|key| assets.lines(language.t(key), style, width - 80.).max(1) as f32 * 36.);
+    let height = 240. + heights.iter().sum::<f32>() + 60.;
+    let panel = Rect::new((1920. - width) / 2., (1080. - height) / 2., width, height);
+    out.modal = Some(panel);
+    out.shadow(panel, 28., 100., 24., 0.47);
+    out.modal_surface(panel, 28.);
+    out.border(panel, 28., 1., c(0xffffff, 0.12));
+    out.text(
+        language.t("homeChooserUpgradeTitle"),
+        Rect::new(panel.x + 40., panel.y + 32., width - 80., 48.),
+        text(34., 600, -0.03),
+        WHITE,
+        true,
+    );
+    let mut y = panel.y + 100.;
+    for (key, height) in keys.into_iter().zip(heights) {
+        out.text(
+            language.t(key),
+            Rect::new(panel.x + 40., y, width - 80., height),
+            style,
+            c(0xf5f5f5, 0.85),
+            true,
+        );
+        y += height + 20.;
+    }
+    for (index, (target, key)) in [
+        (Target::CloseDialog, "close"),
+        (Target::ConfirmUpdate, "homeChooserUpgradeConfirm"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let rect = Rect::new(
+            panel.x + 32. + index as f32 * (width / 2. - 24.),
+            panel.y + panel.h - 96.,
+            width / 2. - 40.,
+            64.,
+        );
+        let focused = state.focus == target;
+        out.pill(rect, focused, false);
+        let label_style = text(21., 600, -0.02);
+        let label_height = label_style.size * label_style.line_height;
+        out.text(
+            language.t(key),
+            Rect::new(
+                rect.x + 16.,
+                rect.y + (rect.h - label_height) / 2.,
+                rect.w - 32.,
+                label_height,
+            ),
+            label_style,
+            if focused { c(0x242424, 1.) } else { WHITE },
+            true,
+        );
+        out.control(target, rect, false);
     }
 }
 
