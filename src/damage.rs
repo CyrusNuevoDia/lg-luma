@@ -16,6 +16,8 @@ pub type Damage = Option<Rect>;
 pub struct Tracker {
     previous: Vec<Draw>,
     history: VecDeque<Damage>,
+    /// Changed without a changed command (a fading layer), added to the next compare.
+    included: Rect,
     refreshed: Rect,
 }
 
@@ -34,6 +36,8 @@ impl Tracker {
         } else {
             diff(&self.previous, commands)
         };
+        let included = std::mem::take(&mut self.included);
+        let damage = damage.map(|area| union(area, included));
         // Idle preparation can change shadow coverage by one colour level without
         // changing a Draw command. Propagate it through the ordinary buffer-age history.
         let refreshed = std::mem::take(&mut self.refreshed);
@@ -47,6 +51,12 @@ impl Tracker {
         self.previous = commands;
     }
 
+    /// Redraws `area` with the next compare, in every back buffer.
+    pub fn include(&mut self, area: Rect) {
+        self.included = union(self.included, area);
+    }
+
+    /// The scene recorded last, i.e. the one on screen after it was drawn.
     pub fn previous(&self) -> &[Draw] {
         &self.previous
     }
@@ -122,6 +132,14 @@ fn diff(old: &[Draw], new: &[Draw]) -> Damage {
 }
 
 /// The area a command can paint. `None` for state that affects everything drawn after it.
+/// Everything `commands` can touch (an empty rect for none).
+pub fn area<'a>(commands: impl IntoIterator<Item = &'a Draw>) -> Rect {
+    commands
+        .into_iter()
+        .filter_map(bounds)
+        .fold(Rect::default(), union)
+}
+
 pub fn bounds(command: &Draw) -> Option<Rect> {
     match command {
         Draw::Glass(rect, ..)
@@ -189,7 +207,7 @@ pub fn intersects(a: Rect, b: Rect) -> bool {
     a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
 }
 
-fn union(a: Rect, b: Rect) -> Rect {
+pub fn union(a: Rect, b: Rect) -> Rect {
     if a.w <= 0. || a.h <= 0. {
         return b;
     }
