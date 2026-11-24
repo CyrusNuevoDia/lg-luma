@@ -63,9 +63,10 @@ is enabled without changing the calling convention; the pinned compiler emits un
 warnings for those target switches. `src/webos-compat.rs` implements `getauxval` for the SDK's
 older libc by reading real kernel auxiliary values, used by Rust startup and TLS CPU detection.
 
-The NDK's SDL is a link-time stub with Wayland disabled. `tools/webos-runtime.mjs` instead pins
-SDL-webOS `release-2.30.12-webos.5`, standard SDL ABI, with archive/library SHA-256 verification.
-It is linked and packaged with runtime name `libSDL2-2.0.so.0`, loaded from `$ORIGIN/lib`.
+The NDK's SDL is a link-time stub with Wayland disabled. `tools/webos-runtime.mjs` instead builds
+SDL-webOS 2.30.12 at commit `50a17c0` with the NDK and cmake, standard SDL ABI, from a
+SHA-256-pinned source archive. That commit adds the `SDL_WEBOS_WINDOW_TYPE` hint the Live TV
+background needs; no release includes it yet. It is linked and packaged with runtime name `libSDL2-2.0.so.0`, loaded from `$ORIGIN/lib`.
 Desktop pkg-config paths are isolated from the ARM build. `WEBOS_NATIVE_LIBS` can point to
 explicitly selected ARM webOS shared libraries; SDL overrides must have a real webOS/Wayland
 backend. Avoid copying the whole SDK library directory or the TV's graphics drivers/libc.
@@ -283,7 +284,7 @@ left and Add widget on the right, using the Backgrounds pill style. Empty cells 
 Add catalog directly; it excludes installed widgets. Reset restores the default membership and
 positions, preserving date/weather configuration and the app dock; an already-default reset does not save.
 The preview shows only widget placements over the wallpaper, without a gray dock placeholder.
-Shortcuts uses a fixed pill at the top left of the preview toolbar. Inputs is a separate sidebar section directly
+Shortcuts and Channels use fixed pills at the top left of the preview toolbar. Inputs is a separate sidebar section directly
 below Apps, not a widget. Its list and individual input/icon settings retain focus on return.
 The input icon picker includes Steam. Automatic detection recognizes the word Steam in labels such
 as Steam Deck, Steam Link and Steam Machine, ahead of generic computer/streaming-device fallbacks.
@@ -304,17 +305,17 @@ Names personalize every time-of-day greeting and remain saved when the widget is
 All three weather styles reflow inside the same fixed footprint. `pnpm screenshots --widgets`
 captures the default arrangement, an alternate arrangement, the grid manager, actions and Add catalog.
 
-| Input                         | Action                                                                       |
-| ----------------------------- | ---------------------------------------------------------------------------- |
-| Arrows                        | Move focus. Down from favorites opens the drawer, Up reaches corner controls |
-| OK / Enter                    | Activate on release                                                          |
-| Hold OK for 600 ms            | Reorder Home favorite or open app options                                    |
-| OK or Back in move mode       | Finish reordering without launching                                          |
-| Escape / Back / Backspace     | Parent navigation, overlay dismissal or Recent apps from Home                |
-| Hold Back / Escape for 600 ms | Open Recent apps while Luma is focused                                       |
-| Menu / M / right-click        | App or background options side popup                                         |
-| Pointer / wheel               | Hover, click, hold and scrolling                                             |
-| F5                            | Refresh inventory                                                            |
+| Input                         | Action                                                                           |
+| ----------------------------- | -------------------------------------------------------------------------------- |
+| Arrows                        | Move focus. Down from favorites opens the drawer, Up reaches corner controls     |
+| OK / Enter                    | Activate on release                                                              |
+| Hold OK for 600 ms            | Reorder Home favorite or open app options                                        |
+| OK or Back in move mode       | Finish reordering without launching                                              |
+| Escape / Back / Backspace     | Parent navigation, overlay dismissal, channel switcher, or Recent apps from Home |
+| Hold Back / Escape for 600 ms | Channel switcher when a Home channel is focused; otherwise Recent apps           |
+| Menu / M / right-click        | App or background options side popup                                             |
+| Pointer / wheel               | Hover, click, hold and scrolling                                                 |
+| F5                            | Refresh inventory                                                                |
 
 Backspace deletes while editing. Native Back uses SDL's webOS-specific keycode. Back dismisses
 the keyboard first; Weather Location then returns to its parent Location row, HDMI choices to
@@ -362,9 +363,24 @@ App cards on Home, in the drawer, and in Settings → Apps are artwork-only, wit
 or App names setting. Legacy `show_names`, `show_home_names`, and `show_app_names` preferences
 are ignored and are not written back. App titles remain available in the management popup.
 **Settings → Widgets** opens the placement manager. Select Weather and choose Configure for its
-settings; **Shortcuts** has a pill at the top left. **Settings → Inputs** is directly below Apps
+settings; **Shortcuts**, **Channels** and **Top Shelf** have pills at the top left. **Settings → Inputs** is directly below Apps
 in the sidebar. Weather location and temperature choices return to Weather; Back from a widget
 returns to its grid cell. Input visibility/naming choices return to the Inputs list, then its sidebar entry.
+Channel favorites return to Channels, then its toolbar pill. Channels can be shown or hidden from that
+subpage without clearing favorites; Left from the list or header restores the Channels pill
+instead of jumping to the sidebar. Top Shelf is on by default: packaging may bake in a
+TMDB key via `LUMA_TMDB_API_KEY`, and its subpage can still override it, plus streaming region and
+suggestion language (Automatic follows the UI language); Back returns to the Top Shelf pill.
+After about 1.5s on a cold mapped Home favorite, popular show art fades in; already-cached apps
+crossfade series→series without dipping to the wallpaper. Home widgets yield the left column while
+the shelf is visible (Stremio uses weekly trending with a short provider fallback). Once the shelf
+settles, the event loop stops requesting animation frames until visibility or a crossfade changes
+again. The Home channels strip shows only selected
+tuner channels (logos from `/mnt/lg/cmn_data/channel_logo` when present); OK tunes via
+`apiadapter/tv/openChannel`. Guide titles prefer `getChannelProgramInfo` (now and next) and fall
+back to `getChannelCurrentProgramInfo`. Back (short or long-hold) on a focused Home channel opens a
+Recents-style switcher over Home favorites with logo and now/next text; OK dismisses the carousel,
+tunes, and launches Live TV so the channel can take the foreground, Back/Up dismiss.
 Existing greeting, weather, shortcut and input preferences are unchanged. Scrollable Settings lists
 reserve 64 logical pixels below their last item for both remote focus and wheel scrolling,
 with a tighter 48-pixel spacing for Languages and Backgrounds.
@@ -541,8 +557,10 @@ System text events update app/location queries; Done/Back stops editing and rest
 
 ### Recent apps
 
-Hold Back (Escape on desktop) for 600 ms from any page to open Recent apps.
-Short Back navigates on release and does nothing on Home; it never opens Recent apps.
+Hold Back (Escape on desktop) for 600 ms from any page to open Recent apps (or the channel
+switcher when a Home channel tile is focused).
+Short Back navigates on release and does nothing on Home, except when a Home channel favorite
+is focused — then it opens the channel switcher. It never opens Recent apps.
 Back in an overlay, the system keyboard or move mode keeps its immediate dismissal behavior;
 Backspace keeps its editing/navigation role.
 Losing window focus cancels an unfinished hold. This is an app-local shortcut while Luma is focused.
@@ -1078,7 +1096,7 @@ verify compositor behavior or memory savings on hardware.
 ### Optional native Home integration
 
 `tv/home.sh` and the native Rust `luma-helper` executable are packaged beside `luma`. They are a root-only, explicit integration
-for webOS 10/25 and 11/26 (and webOS 5/6 and 9/24, see below). `enable` stages a native manifest with ID `com.webos.app.home` and
+for webOS 10/25 and 11/26 (and webOS 5/6, 7/22 and 9/24, see below). `enable` stages a native manifest with ID `com.webos.app.home` and
 symlinks to the installed executable, libraries and assets under `/var/lib/luma-home/app`, then
 bind-mounts it over `/usr/palm/applications/com.webos.app.home`. SAM rereads that one app through
 `blockSystemApp` followed by `releaseBlockSystemApp`, including `forceBlockSystemApp: false` when
@@ -1288,6 +1306,11 @@ runtime font/translation services or telemetry are used. Weather attribution: Op
 
 ## Update availability
 
+This fork installs its own builds, so `update::SELF_UPDATE` is off in TV builds (the `webos`
+feature): they never contact the release feed, the installer worker rejects every request, and
+**Settings → System** shows only the installed version. The rest of this section describes
+upstream's updater, which desktop previews still show.
+
 On interactive desktop or TV startup a separate worker checks
 `https://github.com/ecklf/lg-luma/releases/latest/download/repo.json` once per process automatically.
 **Settings → System → Check again** retries on the same worker, with one request in flight at a time.
@@ -1338,8 +1361,8 @@ permissions; check TV-menu startup, launching/reopening and remote/pointer behav
 versions. Its [library guide](https://www.webosbrew.org/develop/guides/library-version) maps
 internal releases to marketing names: 7/22, 8/23, 9/24, 10/25, 11/26. SDL-webOS's newer
 [`2.30.12-webos.6`](https://github.com/webosbrew/SDL-webOS/releases/tag/release-2.30.12-webos.6)
-reports hotplug verification on webOS 3.4, 4 and 10. That is subsystem evidence for a newer
-prerelease than the pinned `.5` library, not a full Luma compatibility guarantee.
+reports hotplug verification on webOS 3.4, 4 and 10. That is subsystem evidence for SDL-webOS itself, which the pinned
+commit includes, not a full Luma compatibility guarantee.
 
 ## Checks and CI
 
@@ -1355,6 +1378,12 @@ pnpm test
 pnpm assets
 xvfb-run -a pnpm test:smoke
 ```
+
+The ignored `renderer::layer_tests::layer_pixels_match_direct_rendering` test needs generated
+assets and an OpenGL display. After `pnpm assets`, run it with
+`xvfb-run -a cargo test --locked --workspace --all-features layer_pixels_match_direct_rendering -- --ignored --test-threads=1`.
+It compares direct and layered pixels across letterboxed, pillarboxed and 16:9 drawables,
+including clips, resizing and returning to direct rendering. CI runs it after asset generation.
 
 CI prepares checks, unit tests, native assets and the desktop binary once. Four independent
 jobs run navigation/rendering, the brand gallery, mocked weather and translations in parallel,

@@ -10,6 +10,9 @@ use std::{collections::BTreeMap, path::PathBuf};
 #[path = "recents-tests.rs"]
 mod recent_tests;
 
+#[path = "channel-switcher-tests.rs"]
+mod channel_switcher_tests;
+
 #[path = "wallpapers-ui-tests.rs"]
 mod wallpaper_tests;
 
@@ -54,6 +57,29 @@ fn animations_are_paced_when_vsync_is_unavailable() {
     assert_eq!(crate::animation_wait(false, Duration::from_millis(16)), 0);
     assert_eq!(crate::animation_wait(false, Duration::from_millis(30)), 0);
     assert_eq!(crate::animation_wait(true, Duration::ZERO), 0);
+}
+
+#[test]
+fn idle_preparation_keeps_drawer_names_and_options_menu_labels() {
+    use crate::renderer::Draw;
+    let mut state = ready();
+    state.preferences.show_drawer_app_names = true;
+    let assets = view::Assets {
+        root: PathBuf::new(),
+        version: "test".into(),
+        metrics: BTreeMap::new(),
+        artwork: crate::app_artwork::Service::new(false),
+    };
+    let labels = view::initial_drawer_labels(&state, &assets);
+    assert_eq!(labels.len(), state.drawer_apps().len().min(24));
+    assert!(labels.iter().all(|draw| matches!(draw, Draw::Text(..))));
+    let menu = view::options_menu_draws(&state, &assets);
+    for key in ["open", "addFavorite", "hideApp", "deleteApp"] {
+        assert!(menu.iter().any(|draw| matches!(draw, Draw::Text(value, ..) if value == state.preferences.language.t(key))));
+    }
+    state.preferences.show_drawer_app_names = false;
+    assert!(view::initial_drawer_labels(&state, &assets).is_empty());
+    assert!(!view::options_menu_draws(&state, &assets).is_empty());
 }
 
 #[test]
@@ -528,12 +554,14 @@ fn keyboard_is_modal_and_back_restores_its_setting_after_editing() {
 #[test]
 fn partial_refresh_preserves_valid_inputs_and_never_invents_tv_apps() {
     let mut state = ready();
+    let channels = state.inventory.channels.len();
     state.set_inventory(
         crate::model::Inventory::default(),
-        Some("Inputs unavailable".into()),
+        Some("Inputs could not be refreshed: unavailable. Channels could not be refreshed: unavailable".into()),
     );
     assert!(state.inventory.apps.is_empty());
     assert_eq!(state.inventory.inputs.len(), 3);
+    assert_eq!(state.inventory.channels.len(), channels);
     assert_eq!(state.first_content(), Target::WeatherConfigure);
 }
 
@@ -596,6 +624,7 @@ fn asset_loading_and_unknown_app_cards_do_not_require_collected_artwork() {
             crate::model::Inventory {
                 apps: vec![App::new("com.example.regional", "Regional App")],
                 inputs: vec![],
+                channels: vec![],
             },
             None,
         );
@@ -664,6 +693,7 @@ fn gallery_and_grid_navigation_scroll_to_keep_focus_visible() {
                 id: format!("custom-{index:032x}"),
                 directory: PathBuf::from(format!("/preview/wallpapers/custom-{index:032x}")),
                 has_original: true,
+                has_subtle: false,
             })
             .collect(),
     );
@@ -728,6 +758,7 @@ fn gallery_right_crosses_rows_in_gallery_order() {
                 id: format!("custom-{index:032x}"),
                 directory: PathBuf::from(format!("/preview/wallpapers/custom-{index:032x}")),
                 has_original: true,
+                has_subtle: false,
             })
             .collect(),
     );
@@ -1230,6 +1261,30 @@ fn system_version_is_inside_the_update_status_card_without_a_separate_row() {
     state.focus = Target::Sidebar(crate::state::SYSTEM_SECTION);
     state.direction(Direction::Right, &system.controls);
     assert_eq!(state.focus, Target::CheckUpdates);
+}
+
+#[test]
+fn without_self_update_the_system_card_only_shows_the_version() {
+    let mut state = ready();
+    state.self_update = false;
+    state.available_update = Some("99.0.0".into());
+    state.open(2);
+    state.section = crate::state::SYSTEM_SECTION;
+    state.panel_started = None;
+    let system = scene(&state);
+    assert!(
+        !system
+            .controls
+            .iter()
+            .any(|c| matches!(c.target, Target::CheckUpdates | Target::InstallUpdate))
+    );
+    assert!(system.draw.iter().any(|draw| matches!(
+        draw,
+        crate::renderer::Draw::Text(label, ..) if label == "Current version: test"
+    )));
+    state.focus = Target::Sidebar(crate::state::SYSTEM_SECTION);
+    state.direction(Direction::Right, &system.controls);
+    assert_eq!(state.focus, Target::Setting(7));
 }
 
 #[test]
@@ -2887,15 +2942,23 @@ fn widgets_group_existing_settings_and_restore_each_parent_without_changing_pref
             _ => None,
         })
         .collect();
-    assert_eq!(widget_order, [2]);
-    for (index, subpage) in [Subpage::Shortcuts].into_iter().enumerate() {
-        state.focus = Target::Widget(index + 2);
+    assert_eq!(widget_order, [2, 5, 6]);
+    for (widget, subpage) in [
+        (2, Subpage::Shortcuts),
+        (5, Subpage::Channels),
+        (6, Subpage::Shelf),
+    ] {
+        state.focus = Target::Widget(widget);
         state.activate();
         assert_eq!(state.subpage, Some(subpage));
         state.back();
         assert!(state.subpage.is_none());
-        assert_eq!(state.focus, Target::Widget(index + 2));
+        assert_eq!(state.focus, Target::Widget(widget));
     }
+    state.direction(Direction::Left, &controls(&state));
+    assert_eq!(state.focus, Target::Widget(5));
+    state.direction(Direction::Left, &controls(&state));
+    assert_eq!(state.focus, Target::Widget(2));
     state.direction(Direction::Left, &controls(&state));
     assert_eq!(state.focus, Target::Sidebar(WIDGETS_SECTION));
     assert_eq!(serde_json::to_value(&state.preferences).unwrap(), saved);
@@ -2961,10 +3024,26 @@ fn widgets_are_localized_without_legacy_sidebar_entries() {
                 .iter()
                 .filter(|c| matches!(c.target, Target::Widget(_)))
                 .count(),
-            1
+            3
         );
-        for key in ["widgets", "weather", "shortcuts", "inputs", "greeting"] {
-            assert!(page.draw.iter().any(|draw| matches!(draw, crate::renderer::Draw::Text(label, ..) if label == language.t(key))), "{key}/{language:?}");
+        for key in [
+            "widgets",
+            "weather",
+            "shortcuts",
+            "inputs",
+            "greeting",
+            "channels",
+            "topShelf",
+        ] {
+            let expected = language.t(key);
+            assert!(
+                page.draw.iter().any(|draw| matches!(
+                    draw,
+                    crate::renderer::Draw::Text(label, ..)
+                        if label == expected || (label.ends_with('…') && expected.starts_with(label.trim_end_matches('…')))
+                )),
+                "{key}/{language:?}"
+            );
         }
         state.pointer_focus(Target::Sidebar(0));
         assert!(!scene(&state).draw.iter().any(|draw| matches!(draw, crate::renderer::Draw::Text(label, ..) if label == language.t("greeting"))));
@@ -3026,6 +3105,7 @@ fn settings_lists_keep_bottom_padding_for_remote_and_wheel_scrolling() {
                         id: format!("custom-{index:032x}"),
                         directory: std::path::PathBuf::from(".build/padding-fixture"),
                         has_original: true,
+                        has_subtle: false,
                     })
                     .collect(),
             );

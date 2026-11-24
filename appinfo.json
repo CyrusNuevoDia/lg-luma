@@ -16,5 +16,6 @@
   "noSplashOnLaunch": true,
   "iconColor": "#25272d",
   "splashBackground": "splash.png",
-  "bgColor": "#17191c"
+  "bgColor": "#17191c",
+  "noSplashOnLaunch": true
 }

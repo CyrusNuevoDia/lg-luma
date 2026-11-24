@@ -3,13 +3,14 @@ use crate::{
     i18n::Language,
     model::{
         App, BACKGROUNDS, HOME_GRID_CELLS, HOME_GRID_COLUMNS, HOME_GRID_ROWS, HomeWidget, Input,
-        InputMode, WeatherIconStyle, WidgetPosition,
+        InputMode, LIVE_TV_BACKGROUND, WeatherIconStyle, WidgetPosition,
     },
     renderer::{Color, Draw, TextStyle, WHITE},
     state::{
-        APPS_COLUMNS, APPS_SECTION, Control, DRAWER_NAME_HEIGHT, DRAWER_NAME_TOP,
-        HOME_DOCK_PADDING, HOME_DOCK_SLOTS, HOME_TILE_PITCH, HOME_TILE_WIDTH, INPUTS_SECTION, KEYS,
-        Overlay, Page, Rect, SYSTEM_SECTION, State, Subpage, Target, TextField, WIDGETS_SECTION,
+        APPS_COLUMNS, APPS_SECTION, CHANNEL_TILE_PITCH, CHANNEL_TILE_WIDTH, Control,
+        DRAWER_NAME_HEIGHT, DRAWER_NAME_TOP, HOME_DOCK_PADDING, HOME_DOCK_SLOTS, HOME_STRIP_LEFT,
+        HOME_STRIP_RIGHT, HOME_TILE_PITCH, HOME_TILE_WIDTH, INPUTS_SECTION, KEYS, Overlay, Page,
+        Rect, SYSTEM_SECTION, State, Subpage, Target, TextField, WIDGETS_SECTION,
     },
     weather::{self, Unit},
 };
@@ -34,13 +35,15 @@ fn input_icon_width(name: &str, size: f32) -> f32 {
     }
 }
 
+#[path = "channel-switcher-view.rs"]
+mod channel_switcher_view;
 #[path = "recents-view.rs"]
 mod recents_view;
 
 pub struct Assets {
     pub root: PathBuf,
     pub version: String,
-    pub metrics: BTreeMap<String, BTreeMap<char, f32>>,
+    pub metrics: BTreeMap<String, crate::font_metrics::Advances>,
     pub artwork: crate::app_artwork::Service,
 }
 impl Assets {
@@ -66,10 +69,12 @@ impl Assets {
 
     fn background(&self, state: &State, id: &str) -> String {
         if let Some(item) = state.wallpapers.iter().find(|item| item.id == id) {
-            return if state.preferences.wallpaper_gradient {
-                item.image()
-            } else {
+            return if !state.preferences.wallpaper_gradient {
                 item.unshaded_image()
+            } else if state.preferences.subtle_photo_gradient {
+                item.subtle_image()
+            } else {
+                item.image()
             };
         }
         let id = if BACKGROUNDS.iter().any(|(known, _)| *known == id) {
@@ -193,6 +198,8 @@ pub struct Scene {
     pub draw: Vec<Draw>,
     pub controls: Vec<Control>,
     pub modal: Option<Rect>,
+    /// Runs of commands that fade as one surface each (see renderer::Layer).
+    pub layers: Vec<crate::renderer::Layer>,
 }
 impl Scene {
     fn glass(&mut self, rect: Rect, radius: f32) {
@@ -211,6 +218,7 @@ impl Scene {
             draw: Vec::new(),
             controls: Vec::new(),
             modal: None,
+            layers: Vec::new(),
         }
     }
     fn shape(&mut self, rect: Rect, radius: f32, fill: Color) {
@@ -279,7 +287,29 @@ impl Scene {
         }
     }
     fn fade(&mut self, from: usize, alpha: f32, brightness: f32) {
-        for draw in &mut self.draw[from..] {
+        self.fade_range(from, self.draw.len(), alpha, brightness);
+    }
+    /// Fades everything from `from` as one surface (a renderer layer), or command by
+    /// command with LUMA_LAYER=0.
+    fn fade_as_layer(&mut self, from: usize, alpha: f32) {
+        if layers_enabled() && from < self.draw.len() && alpha < 1. {
+            self.layers.push(crate::renderer::Layer {
+                start: from,
+                end: self.draw.len(),
+                alpha,
+            });
+        } else {
+            self.fade(from, alpha, 1.);
+        }
+    }
+    /// Turns layers back into per-command fades, before their indices would shift.
+    fn flatten_layers(&mut self) {
+        for layer in std::mem::take(&mut self.layers) {
+            self.fade_range(layer.start, layer.end, layer.alpha, 1.);
+        }
+    }
+    fn fade_range(&mut self, from: usize, to: usize, alpha: f32, brightness: f32) {
+        for draw in &mut self.draw[from..to] {
             let apply = |color: &mut Color| {
                 for channel in &mut color[..3] {
                     *channel *= brightness;
@@ -299,7 +329,7 @@ impl Scene {
                 }
                 Draw::Image(path, rect, radius, contain) => {
                     *draw = Draw::TintedImage(
-                        path.clone(),
+                        std::mem::take(path),
                         *rect,
                         *radius,
                         *contain,
@@ -516,16 +546,44 @@ pub fn recents_replaces_page(state: &State) -> bool {
     state.recents_open() && state.recents.visibility == 1.
 }
 
+/// Fading pages as offscreen layers (see renderer::Layer); LUMA_LAYER=0 fades each command.
+fn layers_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("LUMA_LAYER").as_deref() != Ok("0"))
+}
+
+/// Fully shown channel switcher replaces the page like Recents.
+pub fn channel_switcher_replaces_page(state: &State) -> bool {
+    state.channel_switcher_open() && state.channel_switcher.visibility == 1.
+}
+
 pub fn scene(state: &State, assets: &Assets, now: OffsetDateTime) -> Scene {
     let mut out = Scene::new();
-    if let Some((previous, start)) = &state.previous_background {
-        out.image(
-            assets.background(state, previous),
-            Rect::new(0., 0., 1920., 1080.),
-            0.,
-            false,
-        );
+    let current = state.preferences.background.as_str();
+    if current == LIVE_TV_BACKGROUND {
+        // Nothing behind the UI: the renderer clears to transparent and the TV shows through.
+        if let Some((previous, start)) = &state.previous_background
+            && previous != LIVE_TV_BACKGROUND
+        {
+            let alpha = (start.elapsed().as_secs_f32() / state.background_fade).min(1.);
+            out.draw.push(Draw::TintedImage(
+                assets.background(state, previous),
+                Rect::new(0., 0., 1920., 1080.),
+                0.,
+                false,
+                [1., 1., 1., 1. - alpha],
+            ));
+        }
+    } else if let Some((previous, start)) = &state.previous_background {
         let alpha = (start.elapsed().as_secs_f32() / state.background_fade).min(1.);
+        if previous != LIVE_TV_BACKGROUND {
+            out.image(
+                assets.background(state, previous),
+                Rect::new(0., 0., 1920., 1080.),
+                0.,
+                false,
+            );
+        }
         out.draw.push(Draw::TintedImage(
             assets.background(state, &state.preferences.background),
             Rect::new(0., 0., 1920., 1080.),
@@ -541,6 +599,7 @@ pub fn scene(state: &State, assets: &Assets, now: OffsetDateTime) -> Scene {
             false,
         );
     }
+    shelf_backdrop(&mut out, state, assets);
     let content_start = out.draw.len();
     if recents_replaces_page(state) {
         out.shape(
@@ -549,6 +608,18 @@ pub fn scene(state: &State, assets: &Assets, now: OffsetDateTime) -> Scene {
             c(0x080b12, RECENTS_BACKDROP_OPACITY),
         );
         recents_view::render(&mut out, state, assets);
+        if let Some((notice, _)) = &state.notice {
+            toast(&mut out, state, assets, notice);
+        }
+        return out;
+    }
+    if channel_switcher_replaces_page(state) {
+        out.shape(
+            Rect::new(0., 0., 1920., 1080.),
+            0.,
+            c(0x080b12, RECENTS_BACKDROP_OPACITY),
+        );
+        channel_switcher_view::render(&mut out, state, assets);
         if let Some((notice, _)) = &state.notice {
             toast(&mut out, state, assets, notice);
         }
@@ -659,6 +730,7 @@ pub fn scene(state: &State, assets: &Assets, now: OffsetDateTime) -> Scene {
             Overlay::TileEditor => tile_editor(&mut out, state, assets),
             Overlay::SystemKeyboard
             | Overlay::Recents { .. }
+            | Overlay::ChannelSwitcher { .. }
             | Overlay::Inputs
             | Overlay::Settings => {}
         }
@@ -676,7 +748,13 @@ pub fn scene(state: &State, assets: &Assets, now: OffsetDateTime) -> Scene {
         // belongs to the restored parent. No geometry or hit targets move.
         let parent_controls = std::mem::take(&mut out.controls);
         let parent_modal = out.modal;
-        out.fade(content_start, 1. - state.recents.visibility, 1.);
+        // The parent page fades as one layer: drawn once, then only its opacity changes.
+        // A layer inside it (a fading subpage) fades per command within that layer.
+        out.flatten_layers();
+        let layered = layers_enabled();
+        if !layered {
+            out.fade(content_start, 1. - state.recents.visibility, 1.);
+        }
         let start = out.draw.len();
         out.shape(
             Rect::new(0., 0., 1920., 1080.),
@@ -684,7 +762,10 @@ pub fn scene(state: &State, assets: &Assets, now: OffsetDateTime) -> Scene {
             c(0x080b12, RECENTS_BACKDROP_OPACITY),
         );
         recents_view::render(&mut out, state, assets);
-        out.fade(start, state.recents.visibility, 1.);
+        let recents_end = out.draw.len();
+        if !layered {
+            out.fade(start, state.recents.visibility, 1.);
+        }
         // Dim the wallpaper beneath the outgoing interface rather than over it. While both
         // fade, the backdrop and Recents' full-screen gradient then lie directly on the
         // wallpaper, and the renderer folds them into it instead of two more full-screen
@@ -693,9 +774,52 @@ pub fn scene(state: &State, assets: &Assets, now: OffsetDateTime) -> Scene {
             .iter()
             .take_while(|draw| full_screen_fill(draw))
             .count();
+        if layered {
+            // Outside both layers, the dimming fills still fade by themselves.
+            out.fade_range(start, start + fills, state.recents.visibility, 1.);
+        }
         let moved: Vec<_> = out.draw.drain(start..start + fills).collect();
         out.draw.splice(content_start..content_start, moved);
+        if layered {
+            // The moved fills stay outside both layers: they fold into the wallpaper.
+            for (start, end, alpha) in [
+                (
+                    content_start + fills,
+                    start + fills,
+                    1. - state.recents.visibility,
+                ),
+                (start + fills, recents_end, state.recents.visibility),
+            ] {
+                if start < end {
+                    out.layers
+                        .push(crate::renderer::Layer { start, end, alpha });
+                }
+            }
+        }
         if !state.recents_open() {
+            out.controls = parent_controls;
+            out.modal = parent_modal;
+        }
+    }
+    if state.channel_switcher_open() || state.channel_switcher.visibility > 0. {
+        let parent_controls = std::mem::take(&mut out.controls);
+        let parent_modal = out.modal;
+        out.fade(content_start, 1. - state.channel_switcher.visibility, 1.);
+        let start = out.draw.len();
+        out.shape(
+            Rect::new(0., 0., 1920., 1080.),
+            0.,
+            c(0x080b12, RECENTS_BACKDROP_OPACITY),
+        );
+        channel_switcher_view::render(&mut out, state, assets);
+        out.fade(start, state.channel_switcher.visibility, 1.);
+        let fills = out.draw[start..]
+            .iter()
+            .take_while(|draw| full_screen_fill(draw))
+            .count();
+        let moved: Vec<_> = out.draw.drain(start..start + fills).collect();
+        out.draw.splice(content_start..content_start, moved);
+        if !state.channel_switcher_open() {
             out.controls = parent_controls;
             out.modal = parent_modal;
         }
@@ -922,6 +1046,35 @@ fn corner_menu(out: &mut Scene, state: &State, assets: &Assets) {
     out.draw.push(Draw::Clip(None));
 }
 
+fn drawer_label(assets: &Assets, app: &App, rect: Rect) -> Draw {
+    let (label, style) = assets.fit_line(&app.title, text(22., 550, -0.02), rect.w, 22.);
+    Draw::Text(
+        label,
+        Rect::new(
+            rect.x,
+            rect.y + rect.h + DRAWER_NAME_TOP,
+            rect.w,
+            DRAWER_NAME_HEIGHT,
+        ),
+        style,
+        WHITE,
+        true,
+    )
+}
+
+/// Names are only visible on focus. Prepare the first four rows without changing focus.
+pub fn initial_drawer_labels(state: &State, assets: &Assets) -> Vec<Draw> {
+    if !state.preferences.show_drawer_app_names {
+        return Vec::new();
+    }
+    state
+        .drawer_apps()
+        .into_iter()
+        .take(4 * APPS_COLUMNS)
+        .map(|app| drawer_label(assets, app, Rect::new(0., 0., 270., FACE_HEIGHT)))
+        .collect()
+}
+
 /// The app options menu's labels and icons, for idle preparation. Text runs are cached by
 /// layout size, not position, so these serve the menu beside any card.
 pub fn options_menu_draws(state: &State, assets: &Assets) -> Vec<Draw> {
@@ -1042,19 +1195,7 @@ fn tile(
     if focused {
         out.ring(rect, 19.2);
         if dock.is_none() && state.page == Page::Apps && state.preferences.show_drawer_app_names {
-            let (label, style) = assets.fit_line(&app.title, text(22., 550, -0.02), rect.w, 22.);
-            out.text(
-                label,
-                Rect::new(
-                    rect.x,
-                    rect.y + rect.h + DRAWER_NAME_TOP,
-                    rect.w,
-                    DRAWER_NAME_HEIGHT,
-                ),
-                style,
-                WHITE,
-                true,
-            );
+            out.draw.push(drawer_label(assets, app, rect));
         }
     }
     if state.pressed.as_ref() == Some(&target) {
@@ -1080,37 +1221,39 @@ fn batch_cards(draw: &mut Vec<Draw>, cards: &[(usize, usize, bool)]) {
     if cards.windows(2).any(|pair| pair[0].1 != pair[1].0) {
         return;
     }
-    let items: Vec<Draw> = draw.drain(begin..end).collect();
+    let mut items = draw.drain(begin..end);
     let mut shadows = Vec::new();
     let mut body = Vec::new();
     let mut borders = Vec::new();
     let mut overlays = Vec::new();
     for &(start, stop, focused) in cards {
         let mut border_taken = focused;
-        for (offset, command) in items[start - begin..stop - begin].iter().enumerate() {
-            match command {
-                Draw::Shadow(..) if !focused && offset == 0 => shadows.push(command.clone()),
+        for (offset, command) in items.by_ref().take(stop - start).enumerate() {
+            match &command {
+                Draw::Shadow(..) if !focused && offset == 0 => shadows.push(command),
                 Draw::Shape(_, _, width, _) if !border_taken && *width == 1. => {
                     border_taken = true;
-                    borders.push(command.clone());
+                    borders.push(command);
                 }
                 Draw::Image(path, ..) | Draw::TintedImage(path, ..)
                     if !focused && path.ends_with(".lvec") =>
                 {
-                    overlays.push(command.clone());
+                    overlays.push(command);
                 }
-                Draw::Text(..) if !focused => overlays.push(command.clone()),
-                _ => body.push(command.clone()),
+                Draw::Text(..) if !focused => overlays.push(command),
+                _ => body.push(command),
             }
         }
     }
-    let ordered: Vec<Draw> = shadows
-        .into_iter()
-        .chain(body)
-        .chain(borders)
-        .chain(overlays)
-        .collect();
-    draw.splice(begin..begin, ordered);
+    drop(items);
+    draw.splice(
+        begin..begin,
+        shadows
+            .into_iter()
+            .chain(body)
+            .chain(borders)
+            .chain(overlays),
+    );
 }
 
 fn favorite_badge(out: &mut Scene, assets: &Assets, card: Rect, color: Color) {
@@ -1291,6 +1434,112 @@ fn brand_mark(out: &mut Scene, assets: &Assets, app: &App, rect: Rect, language:
     }
 }
 
+fn shelf_backdrop(out: &mut Scene, state: &State, assets: &Assets) {
+    let vis = state.shelf.visibility;
+    if vis <= 0.001 {
+        return;
+    }
+    let rect = Rect::new(0., 0., 1920., 1080.);
+    let crossfading = state.shelf.display_app.is_some() && state.shelf.revealed;
+    let fade = if crossfading {
+        state.shelf.crossfade.clamp(0., 1.)
+    } else {
+        1.
+    };
+    let outgoing = state.shelf_outgoing_show();
+    let incoming = state.shelf_current_show();
+    let out_alpha = if outgoing.is_some() {
+        vis * (1. - fade)
+    } else {
+        0.
+    };
+    let in_alpha = if incoming.is_some() { vis * fade } else { 0. };
+
+    if let Some(show) = outgoing
+        && out_alpha > 0.001
+    {
+        shelf_paint_show(out, state, show, rect, out_alpha, fade < 0.5);
+    }
+    if let Some(show) = incoming
+        && in_alpha > 0.001
+    {
+        shelf_paint_show(out, state, show, rect, in_alpha, fade >= 0.5);
+    } else if incoming.is_none()
+        && outgoing.is_none()
+        && let Some(app) = state.shelf_focus_app()
+    {
+        let (top, bottom) = State::shelf_fallback_colors(app);
+        out.draw
+            .push(Draw::RoundedGradient(rect, 0., c(top, vis), c(bottom, vis)));
+    }
+    let _ = assets;
+}
+
+fn shelf_paint_show(
+    out: &mut Scene,
+    state: &State,
+    show: &crate::tmdb::Show,
+    rect: Rect,
+    alpha: f32,
+    paint_copy: bool,
+) {
+    if let Some(path) = &show.backdrop_path {
+        out.draw.push(Draw::TintedImage(
+            path.clone(),
+            rect,
+            0.,
+            false,
+            [1., 1., 1., alpha],
+        ));
+    }
+    out.shape(rect, 0., c(0x080b12, 0.28 * alpha));
+    if !paint_copy {
+        return;
+    }
+    let language = state.preferences.language;
+    // Keep title + overview clear of the channels label (dock_y - 232) or the
+    // favorites glass top when the strip is hidden.
+    let strip_top = if !state.home_channels().is_empty() {
+        state.dock_y() - 232.
+    } else {
+        state.dock_y() - 24.
+    };
+    let title_h = 56.;
+    let overview_gap = 18.;
+    let overview_h = 68.;
+    let clearance = 40.;
+    let title_y = (strip_top - clearance - title_h - overview_gap - overview_h).max(132.);
+    let text_width = 980.;
+    out.text(
+        &show.name,
+        Rect::new(84., title_y, text_width, title_h),
+        text(40., 600, -0.03).leading(1.1),
+        c(0xffffff, 0.94 * alpha),
+        false,
+    );
+    if !show.overview.is_empty() {
+        out.text(
+            &show.overview,
+            Rect::new(
+                84.,
+                title_y + title_h + overview_gap,
+                text_width,
+                overview_h,
+            ),
+            text(20., 450, -0.01).leading(1.3),
+            c(0xffffff, 0.72 * alpha),
+            false,
+        );
+    }
+    out.text(
+        language.t("tmdbAttribution"),
+        Rect::new(84., 980., 900., 28.),
+        text(14., 400, 0.),
+        c(0xffffff, 0.40 * alpha),
+        false,
+    );
+}
+
 fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
     home_widgets(out, state, assets, now);
     let peek = state.preferences.app_drawer_style == crate::model::AppDrawerStyle::Tvos;
@@ -1299,10 +1548,15 @@ fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
         let start = out.draw.len();
         library_grid(out, state, assets);
         if !peek {
-            out.fade(start, state.drawer_progress(), 1.);
+            out.fade(start, state.drawer_content_alpha(), 1.);
         }
         // The Home peek is decorative, including while the drawer settles closed.
         out.controls.truncate(controls);
+    }
+    if !state.home_channels().is_empty() {
+        let start = out.draw.len();
+        channels_strip(out, state, assets);
+        out.fade(start, 1. - state.drawer_progress(), 1.);
     }
     favorites_dock(out, state, assets);
 }
@@ -1457,7 +1711,90 @@ fn home_widgets(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDate
             false,
         );
     }
-    out.fade(start, 1. - state.drawer_progress(), 1.);
+    // Widgets yield the left column while Top Shelf copy owns it.
+    out.fade(
+        start,
+        (1. - state.drawer_progress()) * (1. - state.shelf.visibility),
+        1.,
+    );
+}
+
+fn channels_strip(out: &mut Scene, state: &State, assets: &Assets) {
+    let language = state.preferences.language;
+    let channels = state.home_channels();
+    let y = state.dock_y() - 196.;
+    out.text(
+        language.t("channels"),
+        Rect::new(HOME_STRIP_LEFT, y - 36., 600., 28.),
+        text(18., 550, -0.01).leading(1.2),
+        c(0xffffff, 0.72),
+        false,
+    );
+    let tile_h = 120.;
+    out.draw.push(Draw::Clip(Some(Rect::new(
+        HOME_STRIP_LEFT - 8.,
+        y - 4.,
+        HOME_STRIP_RIGHT - HOME_STRIP_LEFT + 16.,
+        tile_h + 8.,
+    ))));
+    for (index, channel) in channels.iter().enumerate() {
+        let x = HOME_STRIP_LEFT + index as f32 * CHANNEL_TILE_PITCH - state.channel_scroll;
+        let rect = Rect::new(x, y, CHANNEL_TILE_WIDTH, tile_h);
+        let target = Target::Channel(channel.id.clone());
+        let focused = state.focus == target;
+        out.control(target.clone(), rect, false);
+        out.shadow(rect, 18., 20., 8., if focused { 0.28 } else { 0.16 });
+        out.glass(rect, 18.);
+        if focused {
+            out.shape(rect.inset(-3.), 20., c(0xffffff, 0.22));
+        }
+        if let Some(source) = &channel.icon
+            && let Some(art) = assets.artwork.get(source)
+        {
+            // Same GPU path as installed app icons: `Draw::Image` only loads filesystem paths.
+            let face = rect.inset(14.);
+            out.draw
+                .push(Draw::AppImage(art, face, 12., [1., 1., 1., 1.]));
+        } else {
+            let number = if channel.number.is_empty() {
+                "·"
+            } else {
+                &channel.number
+            };
+            out.text(
+                number,
+                Rect::new(rect.x + 12., rect.y + 22., rect.w - 24., 44.),
+                text(28., 650, -0.03),
+                WHITE,
+                true,
+            );
+            out.text(
+                &channel.name,
+                Rect::new(rect.x + 10., rect.y + 70., rect.w - 20., 36.),
+                text(13.5, 500, -0.01).leading(1.15),
+                c(0xffffff, 0.78),
+                true,
+            );
+        }
+    }
+    out.draw.push(Draw::Clip(Some(state.content_viewport())));
+    if let Target::Channel(id) = &state.focus
+        && let Some(channel) = channels.iter().find(|channel| &channel.id == id)
+    {
+        let label = channel
+            .program
+            .as_ref()
+            .map(|program| program.title.as_str())
+            .filter(|title| !title.is_empty())
+            .unwrap_or(channel.name.as_str());
+        out.text(
+            label,
+            Rect::new(HOME_STRIP_LEFT, y + tile_h + 10., 1200., 28.),
+            text(16., 500, -0.01).leading(1.2),
+            c(0xffffff, 0.86),
+            false,
+        );
+    }
 }
 
 fn market_widget(out: &mut Scene, state: &State, assets: &Assets, kind: HomeWidget, cell: Rect) {
@@ -2137,7 +2474,7 @@ fn library(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime)
     let start = out.draw.len();
     library_grid(out, state, assets);
     if state.preferences.app_drawer_style == crate::model::AppDrawerStyle::Minimal {
-        out.fade(start, state.drawer_progress(), 1.);
+        out.fade(start, state.drawer_content_alpha(), 1.);
     }
     // The scrolling grid continues underneath the floating glass and pinned cards.
     favorites_dock(out, state, assets);
@@ -2254,6 +2591,26 @@ struct Row<'a> {
     selected: bool,
     chevron: bool,
 }
+/// The gradient: on, subtle (uploaded photos only) or off.
+fn gradient_value(preferences: &crate::model::Preferences) -> &'static str {
+    match (
+        preferences.wallpaper_gradient,
+        preferences.subtle_photo_gradient,
+    ) {
+        (false, _) => "stateOff",
+        (true, true) => "gradientSubtle",
+        (true, false) => "stateOn",
+    }
+}
+
+fn gradient_value_width(assets: &Assets, language: Language) -> f32 {
+    ["stateOn", "gradientSubtle", "stateOff"]
+        .into_iter()
+        .map(|key| assets.width(language.t(key), text(18.4, 450, 0.)))
+        .fold(0., f32::max)
+        .ceil()
+}
+
 fn rotation_value_width(assets: &Assets, language: Language) -> f32 {
     ["stateOn", "stateOff"]
         .into_iter()
@@ -2312,7 +2669,7 @@ fn row(out: &mut Scene, state: &State, assets: &Assets, row: Row<'_>) {
             | Target::WallpaperCycle
             | Target::WidgetAdd
             | Target::WidgetReset
-            | Target::Widget(2)
+            | Target::Widget(2 | 5)
     ) {
         24.2
     } else {
@@ -2392,7 +2749,7 @@ fn row(out: &mut Scene, state: &State, assets: &Assets, row: Row<'_>) {
             | Target::WallpaperGradient
             | Target::WidgetAdd
             | Target::WidgetReset
-            | Target::Widget(2)
+            | Target::Widget(2 | 5 | 6)
     );
     out.control(row.target, row.rect, scrollable);
 }
@@ -2912,6 +3269,14 @@ fn settings_sidebar(out: &mut Scene, state: &State, assets: &Assets) {
                     language.t("weatherStyle"),
                     language.t("weatherIconStyle"),
                 ]),
+                Some(Subpage::ShelfRegion | Subpage::ShelfLanguage) => Some(vec![
+                    language.t("topShelf"),
+                    language.t(if state.subpage == Some(Subpage::ShelfRegion) {
+                        "streamingRegion"
+                    } else {
+                        "suggestionLanguage"
+                    }),
+                ]),
                 Some(Subpage::InputIcons(id)) => Some(vec![
                     state
                         .inventory
@@ -2943,6 +3308,8 @@ fn settings_sidebar(out: &mut Scene, state: &State, assets: &Assets) {
                 Some(Subpage::Greeting) => language.t("greeting"),
                 Some(Subpage::Weather) => language.t("weather"),
                 Some(Subpage::Shortcuts) => language.t("shortcuts"),
+                Some(Subpage::Channels) => language.t("channels"),
+                Some(Subpage::Shelf) => language.t("topShelf"),
                 Some(Subpage::Clock) => language.t("clock"),
                 Some(Subpage::Language) => language.t("language"),
                 Some(Subpage::AppSorting) => language.t("sorting"),
@@ -3033,6 +3400,8 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
                 | Subpage::WeatherIcons
                 | Subpage::Attributions
                 | Subpage::Shortcuts
+                | Subpage::Channels
+                | Subpage::Shelf
                 | Subpage::Greeting
                 | Subpage::Clock
                 | Subpage::AppDrawer
@@ -3046,6 +3415,8 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
                 Subpage::WeatherIcons => weather_icon_settings(out, state, assets),
                 Subpage::Attributions => attributions(out, state, assets),
                 Subpage::Shortcuts => shortcut_settings(out, state, assets),
+                Subpage::Channels => channels_settings(out, state, assets),
+                Subpage::Shelf => shelf_settings(out, state, assets),
                 Subpage::Greeting => greeting_settings(out, state, assets),
                 Subpage::Clock => clock_settings(out, state, assets),
                 Subpage::AppDrawer => {
@@ -3069,6 +3440,17 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
                             "showAppNames",
                             "grid",
                             language.t(if state.preferences.show_drawer_app_names {
+                                "stateOn"
+                            } else {
+                                "stateOff"
+                            }),
+                            false,
+                        ),
+                        (
+                            crate::state::SMOOTH_DRAWER_FADE_SETTING,
+                            "smoothDrawerFade",
+                            "motion",
+                            language.t(if state.preferences.smooth_drawer_fade {
                                 "stateOn"
                             } else {
                                 "stateOff"
@@ -3106,8 +3488,11 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
                 }
                 _ => unreachable!(),
             }
-            if let Some(opened) = state.panel_started {
-                out.fade(start, (opened.elapsed().as_secs_f32() / 0.15).min(1.), 1.);
+            if let Some(alpha) = state
+                .panel_started
+                .map(|opened| (opened.elapsed().as_secs_f32() / 0.15).min(1.))
+            {
+                out.fade_as_layer(start, alpha);
             }
             return;
         }
@@ -3185,12 +3570,42 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
                         == Unit::Fahrenheit,
                 ),
             ],
+            Subpage::ShelfRegion => crate::tmdb::REGIONS
+                .iter()
+                .map(|region| {
+                    (
+                        if region.code == "auto" {
+                            language.t("stateAuto")
+                        } else {
+                            region.name
+                        },
+                        Some(region.code),
+                        region.code == state.preferences.tmdb_region,
+                    )
+                })
+                .collect(),
+            Subpage::ShelfLanguage => crate::tmdb::SUGGEST_LANGUAGES
+                .iter()
+                .map(|option| {
+                    (
+                        if option.code == "auto" {
+                            language.t("stateAuto")
+                        } else {
+                            option.name
+                        },
+                        Some(option.code),
+                        option.code == state.preferences.tmdb_language,
+                    )
+                })
+                .collect(),
             Subpage::WeatherLocation
             | Subpage::Weather
             | Subpage::WeatherStyle
             | Subpage::WeatherIcons
             | Subpage::Attributions
             | Subpage::Shortcuts
+            | Subpage::Channels
+            | Subpage::Shelf
             | Subpage::Greeting
             | Subpage::Clock
             | Subpage::AppDrawer
@@ -3269,8 +3684,11 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
         if let Subpage::Input(id) = subpage {
             input_name_rows(out, state, assets, id, 164.8 + 3. * 102.7 + 16. - s);
         }
-        if let Some(opened) = state.panel_started {
-            out.fade(start, (opened.elapsed().as_secs_f32() / 0.15).min(1.), 1.);
+        if let Some(alpha) = state
+            .panel_started
+            .map(|opened| (opened.elapsed().as_secs_f32() / 0.15).min(1.))
+        {
+            out.fade_as_layer(start, alpha);
         }
         return;
     }
@@ -3363,7 +3781,7 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
             let cycle_label = language.t("wallpaperCycle");
             let gradient_label = language.t("wallpaperGradient");
             let gradient_width = (assets.width(gradient_label, text(20.8, 550, -0.02))
-                + rotation_value_width(assets, language)
+                + gradient_value_width(assets, language)
                 + 111.6)
                 .ceil()
                 .min(360.);
@@ -3413,11 +3831,7 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
                     } else {
                         "eye-off"
                     }),
-                    value: Some(language.t(if state.preferences.wallpaper_gradient {
-                        "stateOn"
-                    } else {
-                        "stateOff"
-                    })),
+                    value: Some(language.t(gradient_value(&state.preferences))),
                     description: None,
                     selected: false,
                     chevron: false,
@@ -3455,15 +3869,28 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
                     202.5,
                 );
                 out.shadow(rect, 16., 15., 3., 0.13);
-                out.image(
-                    custom.map_or_else(
-                        || assets.path(format!("thumbnails/{id}.jpg")),
-                        |item| item.thumbnail(),
-                    ),
-                    rect,
-                    16.,
-                    false,
-                );
+                if id == LIVE_TV_BACKGROUND {
+                    out.shape(rect, 16., c(0x192a43, 1.));
+                    let icon = Rect::new(rect.x + rect.w / 2. - 32., rect.y + 52., 64., 64.);
+                    out.icon(assets, "tv", icon, c(0xf3f3f3, 1.));
+                    out.text(
+                        state.preferences.language.t("liveTV"),
+                        Rect::new(rect.x, rect.y + 132., rect.w, 40.),
+                        text(26., 600, 0.),
+                        c(0xf3f3f3, 1.),
+                        true,
+                    );
+                } else {
+                    out.image(
+                        custom.map_or_else(
+                            || assets.path(format!("thumbnails/{id}.jpg")),
+                            |item| item.thumbnail(),
+                        ),
+                        rect,
+                        16.,
+                        false,
+                    );
+                }
                 out.border(rect, 16., 1., c(0xffffff, 0.086));
                 if state.preferences.background == id {
                     out.border(rect.inset(-2.), 18., 2., c(0xdedede, 1.));
@@ -3482,45 +3909,61 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
         INPUTS_SECTION => inputs_settings(out, state, assets),
         WIDGETS_SECTION => {
             widget_grid(out, state, assets, None);
-            let shortcuts_width = (assets.width(language.t("shortcuts"), text(20.8, 550, -0.02))
-                + 88.)
-                .ceil()
-                .min(320.);
-            row(
-                out,
-                state,
-                assets,
-                Row {
-                    target: Target::Widget(2),
-                    rect: Rect::new(640., 164.8, shortcuts_width, 64.),
-                    title: language.t("shortcuts"),
-                    icon: Some("sparkles"),
-                    value: None,
-                    description: None,
-                    selected: false,
-                    chevron: false,
-                },
-            );
-            let actions = [
+            let style = text(20.8, 550, -0.02);
+            let pills = [
+                (Target::Widget(2), "shortcuts", "sparkles"),
+                (Target::Widget(5), "channels", "tv"),
+                (Target::Widget(6), "topShelf", "eye"),
                 (Target::WidgetReset, "resetWidgets", "refresh"),
                 (Target::WidgetAdd, "addWidget", "grid"),
-            ]
-            .map(|(target, key, icon)| {
-                let width = (assets.width(language.t(key), text(20.8, 550, -0.02)) + 88.)
-                    .ceil()
-                    .min(500.);
-                (target, key, icon, width)
+            ];
+            let widths = std::array::from_fn::<_, 5, _>(|index| {
+                assets.width(language.t(pills[index].1), style)
             });
-            let mut x = 1760. - actions.iter().map(|(_, _, _, width)| width).sum::<f32>() - 20.;
-            for (target, key, icon, width) in actions {
+            // Five pills share one 1120px toolbar: when long translations overflow it,
+            // only the widest labels are ellipsized, down to a common cap. Each pill adds
+            // 88px of padding plus up to 1px from rounding its width up.
+            let budget = 1120. - 4. * 20. - 5. * 89.;
+            let mut cap = f32::INFINITY;
+            if widths.iter().sum::<f32>() > budget {
+                let mut sorted = widths;
+                sorted.sort_by(f32::total_cmp);
+                let mut used = 0.;
+                for (index, width) in sorted.iter().enumerate() {
+                    let remaining = (sorted.len() - index) as f32;
+                    if used + width * remaining > budget {
+                        cap = (budget - used) / remaining;
+                        break;
+                    }
+                    used += width;
+                }
+            }
+            let labels = std::array::from_fn::<_, 5, _>(|index| {
+                let label = language.t(pills[index].1);
+                if widths[index] > cap {
+                    assets.fit_line(label, style, cap + 1., 20.8).0
+                } else {
+                    label.to_owned()
+                }
+            });
+            let widths = widths.map(|width| (width.min(cap) + 88.).ceil());
+            let right = widths[3] + 20. + widths[4];
+            for (index, (target, _, icon)) in pills.into_iter().enumerate() {
+                let x = match index {
+                    0 => 640.,
+                    1 => 640. + widths[0] + 20.,
+                    2 => 640. + widths[0] + 20. + widths[1] + 20.,
+                    3 => 1760. - right,
+                    _ => 1760. - widths[4],
+                };
                 row(
                     out,
                     state,
                     assets,
                     Row {
                         target,
-                        rect: Rect::new(x, 164.8, width, 64.),
-                        title: language.t(key),
+                        rect: Rect::new(x, 164.8, widths[index], 64.),
+                        title: &labels[index],
                         icon: Some(icon),
                         value: None,
                         description: None,
@@ -3528,33 +3971,45 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
                         chevron: false,
                     },
                 );
-                x += width + 20.;
             }
         }
         SYSTEM_SECTION => {
-            let rect = Rect::new(640., 164.8 - s, 1120., 220.);
-            let title = if matches!(state.update, crate::update::InstallStatus::Failed(_)) {
-                "updateError"
-            } else if state.available_update.is_some() {
-                "updateAvailable"
+            let start = out.draw.len();
+            // Without self-update the card only names the installed version.
+            let (height, rows) = if state.self_update {
+                (220., 408.8)
             } else {
-                match state.update_status {
+                (130., 318.8)
+            };
+            let rect = Rect::new(640., 164.8 - s, 1120., height);
+            let title = if !state.self_update {
+                "Luma"
+            } else if matches!(state.update, crate::update::InstallStatus::Failed(_)) {
+                language.t("updateError")
+            } else if state.available_update.is_some() {
+                language.t("updateAvailable")
+            } else {
+                language.t(match state.update_status {
                     crate::update::Status::Unchecked => "checkForUpdates",
                     crate::update::Status::Checking => "checkingUpdates",
                     crate::update::Status::Checked => "latestVersionInstalled",
                     crate::update::Status::Failed => "updateCheckFailed",
-                }
+                })
             };
             settings_surface(out, rect, 20.);
             out.text(
-                language.t(title),
+                title,
                 Rect::new(rect.x + 24.2, rect.y + 24., rect.w - 48.4, 34.),
                 text(24., 550, -0.02).leading(1.4),
                 WHITE,
                 false,
             );
             out.text(
-                if let Some(latest) = &state.available_update {
+                if let Some(latest) = state
+                    .available_update
+                    .as_ref()
+                    .filter(|_| state.self_update)
+                {
                     language.format(
                         "updateVersions",
                         &[("current", assets.version.trim()), ("latest", latest)],
@@ -3567,29 +4022,31 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
                 c(0xeeeeee, 0.73),
                 false,
             );
-            row(
-                out,
-                state,
-                assets,
-                Row {
-                    target: if state.available_update.is_some() {
-                        Target::InstallUpdate
-                    } else {
-                        Target::CheckUpdates
+            if state.self_update {
+                row(
+                    out,
+                    state,
+                    assets,
+                    Row {
+                        target: if state.available_update.is_some() {
+                            Target::InstallUpdate
+                        } else {
+                            Target::CheckUpdates
+                        },
+                        rect: Rect::new(rect.x + 24., rect.y + 132., rect.w - 48., 64.),
+                        title: &update_value(state),
+                        icon: Some(if state.available_update.is_some() {
+                            "arrow"
+                        } else {
+                            "refresh"
+                        }),
+                        value: None,
+                        description: None,
+                        selected: false,
+                        chevron: false,
                     },
-                    rect: Rect::new(rect.x + 24., rect.y + 132., rect.w - 48., 64.),
-                    title: &update_value(state),
-                    icon: Some(if state.available_update.is_some() {
-                        "arrow"
-                    } else {
-                        "refresh"
-                    }),
-                    value: None,
-                    description: None,
-                    selected: false,
-                    chevron: false,
-                },
-            );
+                );
+            }
             for (position, (index, title, icon, value, chevron)) in [
                 (
                     7,
@@ -3628,8 +4085,7 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
                         },
                         rect: Rect::new(
                             640.,
-                            408.8
-                                + position as f32 * 84.
+                            rows + position as f32 * 84.
                                 + if position > 0 { 16. } else { 0. }
                                 + if position > 2 { 16. } else { 0. }
                                 - s,
@@ -3645,9 +4101,220 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
                     },
                 );
             }
+            group_row_surfaces(&mut out.draw[start..]);
         }
         _ => {}
     }
+}
+
+/// System rows are painted top to bottom. If every glass surface is below all
+/// preceding labels and decorations, all glass can share a draw before the labels.
+fn group_row_surfaces(commands: &mut [Draw]) {
+    let mut bottom: f32 = f32::NEG_INFINITY;
+    for command in commands.iter() {
+        let Some(bounds) = crate::damage::bounds(command) else {
+            return;
+        };
+        if matches!(command, Draw::Glass(..)) {
+            if bounds.y < bottom + 4. {
+                return;
+            }
+        } else {
+            bottom = bottom.max(bounds.y + bounds.h);
+        }
+    }
+    commands.sort_by_key(|command| !matches!(command, Draw::Glass(..)));
+}
+
+fn shelf_settings(out: &mut Scene, state: &State, assets: &Assets) {
+    let language = state.preferences.language;
+    let s = state.scroll;
+    row(
+        out,
+        state,
+        assets,
+        Row {
+            target: Target::ShelfToggle,
+            rect: Rect::new(640., 164.8 - s, 1120., 72.),
+            title: language.t("showWidget"),
+            icon: Some("eye"),
+            value: Some(language.t(if state.preferences.show_shelf {
+                "stateOn"
+            } else {
+                "stateOff"
+            })),
+            description: None,
+            selected: false,
+            chevron: false,
+        },
+    );
+    let key = crate::tmdb::sanitize_key(&state.preferences.tmdb_api_key);
+    let key_label = if state.text_input_active() && state.keyboard_field == TextField::ShelfKey {
+        format!("{}|", state.shelf_key_draft)
+    } else if key.is_empty() {
+        if crate::tmdb::bundled_api_key().len() >= 16 {
+            language.t("tmdbKeyBundled").into()
+        } else {
+            language.t("tmdbKeyMissing").into()
+        }
+    } else {
+        format!("{}…", key.chars().take(4).collect::<String>())
+    };
+    row(
+        out,
+        state,
+        assets,
+        Row {
+            target: Target::ShelfKey,
+            rect: Rect::new(640., 248.8 - s, 1120., 90.7),
+            title: language.t("tmdbApiKey"),
+            icon: Some("type"),
+            value: None,
+            description: Some(&key_label),
+            selected: false,
+            chevron: true,
+        },
+    );
+    let region = crate::tmdb::REGIONS
+        .get(crate::tmdb::region_index(&state.preferences.tmdb_region))
+        .map(|region| {
+            if region.code == "auto" {
+                language.t("stateAuto")
+            } else {
+                region.name
+            }
+        })
+        .unwrap_or(language.t("stateAuto"));
+    row(
+        out,
+        state,
+        assets,
+        Row {
+            target: Target::ShelfRegion,
+            rect: Rect::new(640., 351.5 - s, 1120., 72.),
+            title: language.t("streamingRegion"),
+            icon: Some("globe"),
+            value: Some(region),
+            description: None,
+            selected: false,
+            chevron: true,
+        },
+    );
+    let suggest = crate::tmdb::SUGGEST_LANGUAGES
+        .get(crate::tmdb::language_index(
+            &state.preferences.tmdb_language,
+        ))
+        .map(|option| {
+            if option.code == "auto" {
+                language.t("stateAuto")
+            } else {
+                option.name
+            }
+        })
+        .unwrap_or(language.t("stateAuto"));
+    row(
+        out,
+        state,
+        assets,
+        Row {
+            target: Target::ShelfLanguage,
+            rect: Rect::new(640., 435.5 - s, 1120., 72.),
+            title: language.t("suggestionLanguage"),
+            icon: Some("language"),
+            value: Some(suggest),
+            description: None,
+            selected: false,
+            chevron: true,
+        },
+    );
+    out.text(
+        language.t("tmdbAttribution"),
+        Rect::new(664., 535. - s, 1070., 48.),
+        text(15.2, 400, 0.).leading(1.35),
+        c(0xf5f5f5, 0.55),
+        false,
+    );
+}
+
+fn channels_settings(out: &mut Scene, state: &State, assets: &Assets) {
+    let language = state.preferences.language;
+    let s = state.scroll;
+    row(
+        out,
+        state,
+        assets,
+        Row {
+            target: Target::ChannelsToggle,
+            rect: Rect::new(640., 164.8 - s, 1120., 72.),
+            title: language.t("showWidget"),
+            icon: Some("eye"),
+            value: Some(language.t(if state.preferences.show_channels {
+                "stateOn"
+            } else {
+                "stateOff"
+            })),
+            description: None,
+            selected: false,
+            chevron: false,
+        },
+    );
+    let ordered = state.channels_settings_list();
+    for (index, channel) in ordered.iter().enumerate() {
+        let on_home = state.preferences.channel_on_home(&channel.id);
+        let title = if channel.number.is_empty() {
+            channel.name.clone()
+        } else {
+            format!("{} · {}", channel.number, channel.name)
+        };
+        row(
+            out,
+            state,
+            assets,
+            Row {
+                target: Target::ChannelFavorite(channel.id.clone()),
+                rect: Rect::new(640., 248.8 + index as f32 * 84. - s, 1120., 72.),
+                title: &title,
+                icon: Some(if channel.radio { "generic" } else { "tv" }),
+                value: Some(language.t(if on_home { "stateOn" } else { "stateOff" })),
+                description: channel
+                    .program
+                    .as_ref()
+                    .map(|program| program.title.as_str()),
+                selected: on_home,
+                chevron: false,
+            },
+        );
+    }
+    let mut y = 248.8 + ordered.len() as f32 * 84. + 16. - s;
+    if ordered.is_empty() {
+        out.text(
+            language.t("noChannels"),
+            Rect::new(664., 249. - s, 1000., 26.),
+            text(16.8, 400, 0.).leading(1.5),
+            c(0xf5f5f5, 0.72),
+            false,
+        );
+        y += 36.;
+    }
+    row(
+        out,
+        state,
+        assets,
+        Row {
+            target: Target::Setting(6),
+            rect: Rect::new(640., y, 1120., 72.),
+            title: if state.loading {
+                language.t("refreshNotice")
+            } else {
+                language.t("refreshChannels")
+            },
+            icon: Some("refresh"),
+            value: None,
+            description: None,
+            selected: false,
+            chevron: false,
+        },
+    );
 }
 
 fn inputs_settings(out: &mut Scene, state: &State, assets: &Assets) {
@@ -3783,7 +4450,10 @@ fn widget_grid(out: &mut Scene, state: &State, assets: &Assets, moving: Option<H
             || assets.path(format!("wallpapers/{}.jpg", state.preferences.background)),
             |item| item.image(),
         );
-    out.image(background, preview, 20., false);
+    // Live TV has no image; the preview keeps its scrim.
+    if state.preferences.background != LIVE_TV_BACKGROUND {
+        out.image(background, preview, 20., false);
+    }
     out.shape(preview, 20., c(0x111519, 0.35));
     let scale = preview.w / 1920.;
     let map = |rect: Rect| {
@@ -4918,6 +5588,7 @@ fn keyboard(out: &mut Scene, state: &State, assets: &Assets) {
             TextField::InputName => language.t("inputName"),
             TextField::GreetingName => language.t("name"),
             TextField::Market(_) => language.t("marketSymbol"),
+            TextField::ShelfKey => language.t("tmdbApiKey"),
             TextField::Apps => language.t("findApp"),
         },
         Rect::new(389., 324., 1000., 44.),
@@ -5263,11 +5934,20 @@ mod tests {
             root: PathBuf::new(),
             version: "test".into(),
             metrics: BTreeMap::from([
-                ("display-500".into(), BTreeMap::from([('W', 1.)])),
-                ("500".into(), BTreeMap::from([('W', 1.2)])),
+                (
+                    "display-500".into(),
+                    crate::font_metrics::Advances::Individual(BTreeMap::from([('W', 1.)])),
+                ),
+                (
+                    "500".into(),
+                    crate::font_metrics::Advances::Individual(BTreeMap::from([('W', 1.2)])),
+                ),
                 (
                     "fallback-500".into(),
-                    BTreeMap::from([('界', 1.), ('한', 1.)]),
+                    crate::font_metrics::Advances::Individual(BTreeMap::from([
+                        ('界', 1.),
+                        ('한', 1.),
+                    ])),
                 ),
             ]),
             artwork: crate::app_artwork::Service::new(false),

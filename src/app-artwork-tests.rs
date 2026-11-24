@@ -29,7 +29,7 @@ fn png(image: RgbaImage) -> Vec<u8> {
 fn poll_until(service: &Service, mut done: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
-        service.poll();
+        service.poll(|_| {});
         if done() {
             break;
         }
@@ -582,6 +582,7 @@ fn grid_and_options_use_matching_adaptive_hearts_without_a_backing_circle() {
             crate::model::Inventory {
                 apps,
                 inputs: vec![],
+                channels: vec![],
             },
             None,
         );
@@ -640,6 +641,7 @@ fn visible_cards_switch_from_fallback_to_a_single_composited_installed_surface()
         crate::model::Inventory {
             apps,
             inputs: vec![],
+            channels: vec![],
         },
         None,
     );

@@ -3,6 +3,9 @@ use crate::weather::{Location, Unit};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 
+/// Background that draws no image, so live TV or the current input shows through.
+/// Luma then opens as a webOS overlay window, which the TV keeps playing behind.
+pub const LIVE_TV_BACKGROUND: &str = "live-tv";
 pub const BACKGROUNDS: [(&str, &str); 1] = [("midnight", "Midnight")];
 pub const DEFAULT_BACKGROUND: &str = "midnight";
 
@@ -87,10 +90,42 @@ impl Input {
     }
 }
 
+/// A tuner channel from LG's channel map (`apiadapter/tv/getChannelList`).
+#[derive(Clone, Debug, Serialize)]
+pub struct Channel {
+    pub id: String,
+    pub number: String,
+    pub name: String,
+    pub radio: bool,
+    /// Absolute logo path under `/mnt/lg/cmn_data/channel_logo`, when present.
+    pub logo: Option<String>,
+    #[serde(skip)]
+    pub icon: Option<crate::app_artwork::Source>,
+    #[serde(skip)]
+    pub program: Option<ChannelProgram>,
+    #[serde(skip)]
+    pub next: Option<ChannelProgram>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ChannelProgram {
+    pub title: String,
+    pub start: Option<u64>,
+    pub end: Option<u64>,
+}
+
+/// Now-playing and optional next show from the tuner guide.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ChannelGuideEntry {
+    pub program: Option<ChannelProgram>,
+    pub next: Option<ChannelProgram>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Inventory {
     pub apps: Vec<App>,
     pub inputs: Vec<Input>,
+    pub channels: Vec<Channel>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -504,6 +539,9 @@ pub struct Preferences {
     pub app_sorting: AppSorting,
     pub app_drawer_style: AppDrawerStyle,
     pub show_drawer_app_names: bool,
+    /// The drawer grid turns opaque at 70% of its motion, which keeps the animation at 60 fps
+    /// on webOS 5 TVs; off, it fades in over the whole motion.
+    pub smooth_drawer_fade: bool,
     pub app_launch_counts: BTreeMap<String, u64>,
     pub greeting_position: WidgetPosition,
     pub weather_position: WidgetPosition,
@@ -511,6 +549,10 @@ pub struct Preferences {
     #[serde(rename = "date_position", skip_serializing)]
     pub legacy_date_position: Option<WidgetPosition>,
     pub favorites: Option<Vec<String>>,
+    /// Ordered tuner channel IDs shown on the Home channels strip.
+    pub channel_favorites: Vec<String>,
+    /// When false, the Home channels strip is hidden (favorites are kept).
+    pub show_channels: bool,
     pub custom_tiles: Vec<CustomTile>,
     pub hidden: Vec<String>,
     pub background: String,
@@ -542,8 +584,18 @@ pub struct Preferences {
     #[serde(deserialize_with = "crate::wallpaper_cycle::deserialize")]
     pub wallpaper_cycle: bool,
     pub wallpaper_gradient: bool,
+    /// With the gradient on: uploaded photos get the subtle, photo-aware one instead.
+    pub subtle_photo_gradient: bool,
     /// Unix seconds of the last automatic or chosen wallpaper change, for the timed modes.
     pub wallpaper_changed: u64,
+    /// Home Top Shelf: TMDB popular shows for mapped streaming favorites.
+    pub show_shelf: bool,
+    /// User TMDB v3 API key (https://www.themoviedb.org/settings/api). Never logged.
+    pub tmdb_api_key: String,
+    /// `auto` or ISO 3166-1 alpha-2 watch region.
+    pub tmdb_region: String,
+    /// `auto` or BCP-47 suggestion language (e.g. `ca-ES`).
+    pub tmdb_language: String,
 }
 
 impl Default for Preferences {
@@ -566,11 +618,14 @@ impl Default for Preferences {
             app_sorting: AppSorting::default(),
             app_drawer_style: AppDrawerStyle::default(),
             show_drawer_app_names: false,
+            smooth_drawer_fade: true,
             app_launch_counts: BTreeMap::new(),
             greeting_position: HomeWidget::Greeting.default_position(),
             weather_position: HomeWidget::Weather.default_position(),
             legacy_date_position: None,
             favorites: None,
+            channel_favorites: vec![],
+            show_channels: true,
             custom_tiles: vec![],
             hidden: vec![],
             background: DEFAULT_BACKGROUND.into(),
@@ -593,7 +648,12 @@ impl Default for Preferences {
             text_rendering: crate::text_rendering::TextRendering::default(),
             wallpaper_cycle: false,
             wallpaper_gradient: true,
+            subtle_photo_gradient: false,
             wallpaper_changed: 0,
+            show_shelf: true,
+            tmdb_api_key: String::new(),
+            tmdb_region: "auto".into(),
+            tmdb_language: "auto".into(),
         }
     }
 }
@@ -739,15 +799,12 @@ impl Preferences {
         true
     }
 
-    pub fn compare_apps(&self, a: &App, b: &App) -> std::cmp::Ordering {
-        let usage = |app: &App| self.app_launch_counts.get(&app.id).copied().unwrap_or(0);
+    pub fn app_sort_key<'a>(&self, app: &'a App) -> (std::cmp::Reverse<u64>, String, &'a str) {
         let count = match self.app_sorting {
-            AppSorting::Alphabetical => std::cmp::Ordering::Equal,
-            AppSorting::Usage => usage(b).cmp(&usage(a)),
+            AppSorting::Alphabetical => 0,
+            AppSorting::Usage => self.app_launch_counts.get(&app.id).copied().unwrap_or(0),
         };
-        count
-            .then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase()))
-            .then_with(|| a.id.cmp(&b.id))
+        (std::cmp::Reverse(count), app.title.to_lowercase(), &app.id)
     }
 
     pub fn weather_visible(&self) -> bool {
@@ -888,6 +945,34 @@ impl Preferences {
             }
             ids
         })
+    }
+
+    /// Home strip order: saved favorites that still exist in the tuner map.
+    pub fn channel_favorites<'a>(&self, channels: &'a [Channel]) -> Vec<&'a Channel> {
+        self.channel_favorites
+            .iter()
+            .filter_map(|id| channels.iter().find(|channel| &channel.id == id))
+            .take(crate::channels::MAX_FAVORITES)
+            .collect()
+    }
+
+    pub fn toggle_channel_favorite(&mut self, id: &str) -> bool {
+        if !valid_app_id(id) {
+            return false;
+        }
+        if let Some(index) = self.channel_favorites.iter().position(|saved| saved == id) {
+            self.channel_favorites.remove(index);
+            return true;
+        }
+        if self.channel_favorites.len() >= crate::channels::MAX_FAVORITES {
+            return false;
+        }
+        self.channel_favorites.push(id.into());
+        true
+    }
+
+    pub fn channel_on_home(&self, id: &str) -> bool {
+        self.channel_favorites.iter().any(|saved| saved == id)
     }
 
     /// Synthetic `App` entries for custom tiles, merged into the real
@@ -1045,7 +1130,8 @@ impl Preferences {
             }
             placed.push(widget);
         }
-        if !BACKGROUNDS.iter().any(|(id, _)| *id == self.background)
+        if self.background != LIVE_TV_BACKGROUND
+            && !BACKGROUNDS.iter().any(|(id, _)| *id == self.background)
             && !crate::wallpapers::valid_id(&self.background)
         {
             self.background = DEFAULT_BACKGROUND.into();
@@ -1064,6 +1150,9 @@ impl Preferences {
         if let Some(ids) = &mut self.favorites {
             clean(ids);
         }
+        clean(&mut self.channel_favorites);
+        self.channel_favorites
+            .truncate(crate::channels::MAX_FAVORITES);
         clean(&mut self.hidden);
         {
             let mut seen = HashSet::new();
@@ -1094,6 +1183,19 @@ impl Preferences {
             .filter(|(_, name)| !name.is_empty())
             .take(128)
             .collect();
+        self.tmdb_api_key = crate::tmdb::sanitize_key(&self.tmdb_api_key);
+        if !crate::tmdb::REGIONS
+            .iter()
+            .any(|region| region.code == self.tmdb_region)
+        {
+            self.tmdb_region = "auto".into();
+        }
+        if !crate::tmdb::SUGGEST_LANGUAGES
+            .iter()
+            .any(|language| language.code == self.tmdb_language)
+        {
+            self.tmdb_language = "auto".into();
+        }
     }
 }
 
@@ -1282,6 +1384,28 @@ pub fn demo_inventory() -> Inventory {
                 signal: None,
             },
         ],
+        channels: [
+            ("1_31_1_0_1008_494_8916", "1", "La 1 HD", false),
+            ("1_33_2_0_1007_10560_8916", "2", "La 2Cat", false),
+            ("1_33_3_0_1007_10550_8916", "3", "TV3 UHD", false),
+            ("1_26_4_0_1001_5001_8916", "4", "SX3/33", false),
+            ("1_34_6_0_1002_2563_8916", "6", "Antena 3", false),
+            ("1_35_7_0_1003_2571_8916", "7", "Cuatro", false),
+            ("1_36_9_0_1004_2583_8916", "9", "laSexta", false),
+            ("1_40_21_0_1101_1_8916", "21", "Catalunya Ràdio", true),
+        ]
+        .into_iter()
+        .map(|(id, number, name, radio)| Channel {
+            id: id.into(),
+            number: number.into(),
+            name: name.into(),
+            radio,
+            logo: None,
+            icon: None,
+            program: None,
+            next: None,
+        })
+        .collect(),
     };
     // Desktop-only artwork gallery. TV inventory is always read from services.
     for brand in crate::branding::BRANDS {

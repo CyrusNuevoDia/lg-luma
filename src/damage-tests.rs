@@ -45,6 +45,48 @@ fn area(damage: Damage) -> Rect {
 }
 
 #[test]
+fn moving_a_presented_scene_into_the_tracker_preserves_damage() {
+    let mut tracker = Tracker::default();
+    tracker.compare(&[wallpaper(), shape(100.)], 2., bounds);
+    assert!(tracker.damage(1).is_none());
+    tracker.remember(vec![wallpaper(), shape(100.)]);
+
+    tracker.compare(&[wallpaper(), shape(400.)], 2., bounds);
+    let changed = area(tracker.damage(1));
+    assert_eq!((changed.x, changed.w), (99., 402.));
+    assert_eq!(tracker.previous().len(), 2);
+    tracker.remember(vec![wallpaper(), shape(400.)]);
+
+    tracker.compare(&[wallpaper(), shape(400.)], 2., bounds);
+    let unchanged = area(tracker.damage(1));
+    assert!(unchanged.w <= 0. || unchanged.h <= 0.);
+}
+
+#[test]
+fn moving_commands_stay_aligned_with_their_following_clip() {
+    let mut tracker = Tracker::default();
+    tracker.push(&[
+        wallpaper(),
+        Draw::Clip(Some(Rect::new(64., 100., 1792., 900.))),
+        shape(100.),
+        shape(400.),
+        shape(700.),
+        Draw::Clip(None),
+    ]);
+    tracker.push(&[
+        wallpaper(),
+        Draw::Clip(Some(Rect::new(64., 100., 1792., 900.))),
+        shape(120.),
+        shape(420.),
+        shape(720.),
+        Draw::Clip(None),
+    ]);
+    let changed = area(tracker.damage(1));
+    assert_eq!((changed.x, changed.x + changed.w), (99., 821.));
+    assert_eq!((changed.y, changed.h), (299., 102.));
+}
+
+#[test]
 fn the_first_frame_and_unknown_buffer_ages_redraw_everything() {
     let mut tracker = Tracker::default();
     tracker.push(&[wallpaper(), shape(100.)]);
@@ -100,6 +142,25 @@ fn a_moved_shape_damages_its_old_and_new_place_only() {
 }
 
 #[test]
+fn layer_damage_and_idle_shadow_refresh_share_buffer_age_history() {
+    let shadow = Draw::Shadow(Rect::new(100., 90., 30., 20.), 8., 4., [0.; 4]);
+    let scene = [wallpaper(), shadow];
+    let mut tracker = Tracker::default();
+    for _ in 0..4 {
+        tracker.push(&scene);
+    }
+    tracker.include(Rect::new(400., 300., 100., 80.));
+    tracker.refresh_shadows(|_| true, bounds);
+    for _ in 0..3 {
+        tracker.push(&scene);
+        let rect = area(tracker.damage(3));
+        assert_eq!((rect.x, rect.y, rect.w, rect.h), (95., 85., 405., 295.));
+    }
+    tracker.push(&scene);
+    assert_eq!(area(tracker.damage(3)).w, 0.);
+}
+
+#[test]
 fn an_inserted_focus_ring_realigns_instead_of_redrawing_everything() {
     let mut tracker = Tracker::default();
     tracker.push(&[wallpaper(), shape(100.), shape(400.), shape(700.)]);
@@ -130,19 +191,19 @@ fn older_back_buffers_need_every_change_since_their_frame() {
 }
 
 #[test]
-fn changed_clip_or_fade_state_redraws_everything() {
+fn changed_clip_or_fade_includes_the_affected_draws() {
     let mut tracker = Tracker::default();
     let clip = |y: f32| Draw::Clip(Some(Rect::new(0., y, 1920., 500.)));
     tracker.push(&[wallpaper(), clip(100.), shape(100.), Draw::Clip(None)]);
     tracker.push(&[wallpaper(), clip(120.), shape(100.), Draw::Clip(None)]);
-    assert!(tracker.damage(1).is_none());
+    assert_eq!(area(tracker.damage(1)).w, 102.);
     tracker.push(&[
         wallpaper(),
         clip(120.),
         Draw::EdgeFade(Some([0., 1., 2., 3.])),
         shape(100.),
     ]);
-    assert!(tracker.damage(1).is_none());
+    assert_eq!(area(tracker.damage(1)).w, 102.);
 }
 
 #[test]
@@ -235,4 +296,23 @@ fn an_unchanged_frame_names_a_pixel_inside_the_drawable() {
             "{width}x{height}: [{x}, {y}, {w}, {h}] lies outside the drawable"
         );
     }
+}
+
+#[test]
+fn a_clip_change_redraws_the_visible_old_and_new_pixels_of_an_identical_suffix() {
+    let card = || Draw::Shape(Rect::new(0., 0., 1920., 1080.), 0., 0., [1.; 4]);
+    let clipped = |x| {
+        vec![
+            wallpaper(),
+            Draw::Clip(Some(Rect::new(x, 20., 70., 60.))),
+            card(),
+            Draw::Clip(None),
+            shape(800.),
+        ]
+    };
+    let mut tracker = Tracker::default();
+    tracker.push(&clipped(20.));
+    tracker.push(&clipped(200.));
+    let r = area(tracker.damage(1));
+    assert_eq!((r.x, r.y, r.w, r.h), (18., 18., 254., 64.));
 }

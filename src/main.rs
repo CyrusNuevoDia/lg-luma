@@ -5,12 +5,16 @@ mod app_artwork;
 #[path = "app-subscription.rs"]
 mod app_subscription;
 mod branding;
+#[path = "channel-switcher.rs"]
+mod channel_switcher;
+mod channels;
 mod companion;
 mod damage;
 mod diagnostics;
 mod egl_damage;
 mod feedback;
 mod font;
+mod font_metrics;
 mod gamepad;
 mod glass_backdrop;
 mod i18n;
@@ -28,11 +32,15 @@ mod renderer;
 #[path = "scroll-preview.rs"]
 mod scroll_preview;
 mod sdl_events;
+mod shelf;
 mod state;
 mod storage;
 mod text_rendering;
 #[path = "tile-editor.rs"]
 mod tile_editor;
+mod tmdb;
+#[path = "tmdb-service.rs"]
+mod tmdb_service;
 mod update;
 mod vector;
 mod view;
@@ -348,6 +356,7 @@ fn effects(
     platform: &Platform,
     preferences: &std::path::Path,
     weather: &weather_service::Service,
+    tmdb: &tmdb_service::Service,
     wallpapers: &wallpapers::Service,
     webhook: &webhook::Service,
     updates: &update::Worker,
@@ -371,6 +380,47 @@ fn effects(
             Effect::Launch(id) => {
                 launch_app(state, platform.webos, id, |request| platform.send(request));
             }
+            Effect::OpenChannel(id) => {
+                if !state.launching {
+                    if platform.webos {
+                        state.launching = true;
+                        state.notify(state.preferences.language.t("opening"));
+                        // Live TV first so a slow elevated tune cannot leave Home
+                        // in front; guide refresh runs off the launch worker.
+                        platform.send(Request::Launch("com.webos.app.livetv".into()));
+                        platform.send(Request::OpenChannel(id));
+                    } else {
+                        let title = state
+                            .inventory
+                            .channels
+                            .iter()
+                            .find(|channel| channel.id == id)
+                            .map_or(id.as_str(), |channel| channel.name.as_str());
+                        state.notify(
+                            state
+                                .preferences
+                                .language
+                                .format("desktopPreview", &[("app", title)]),
+                        );
+                    }
+                }
+            }
+            Effect::RefreshChannelGuide => {
+                let guide_ids: Vec<_> = if state.preferences.channel_favorites.is_empty() {
+                    state
+                        .inventory
+                        .channels
+                        .iter()
+                        .take(12)
+                        .map(|channel| channel.id.clone())
+                        .collect()
+                } else {
+                    state.preferences.channel_favorites.clone()
+                };
+                if !guide_ids.is_empty() {
+                    platform.send(Request::RefreshChannelGuide(guide_ids));
+                }
+            }
             Effect::FireWebhook(tile) => webhook.send(tile),
             Effect::UpdateDownload(release) => updates.request(update::Request::Download(release)),
             Effect::Quit => return false,
@@ -378,6 +428,7 @@ fn effects(
             Effect::DeleteWallpaper(id) => {
                 wallpapers.delete(id, state.preferences.background.clone())
             }
+            Effect::PrepareSubtleWallpapers => wallpapers.prepare_subtle(),
             Effect::Recent {
                 generation,
                 command,
@@ -388,6 +439,9 @@ fn effects(
                 });
             }
             Effect::Weather(command) => weather.send(command),
+            Effect::Shelf(command) => {
+                tmdb.send(command);
+            }
         }
     }
     true
@@ -417,7 +471,8 @@ fn script(
         "right" => state.direction(Direction::Right, controls),
         "enter" => state.activate(),
         "back" => state.back(),
-        "recents" | "hold-back" => state.open_recents(),
+        "recents" => state.open_recents(),
+        "hold-back" => state.open_back_overlay(),
         "menu" => {
             state.options();
             vec![]
@@ -435,6 +490,7 @@ fn script(
                     Some(state::Subpage::WeatherLocation) => state::TextField::Location,
                     Some(state::Subpage::Input(_)) => state::TextField::InputName,
                     Some(state::Subpage::Greeting) => state::TextField::GreetingName,
+                    Some(state::Subpage::Shelf) => state::TextField::ShelfKey,
                     _ => state::TextField::Apps,
                 }
             };
@@ -483,6 +539,7 @@ fn input_refresh_active(state: &State, webos: bool, focused: bool, visible: bool
         && state.moving.is_none()
         && state.pressed.is_none()
         && state.recents.visibility == 0.
+        && state.channel_switcher.visibility == 0.
 }
 
 fn animation_wait(vsync: bool, elapsed: Duration) -> u32 {
@@ -630,7 +687,11 @@ fn next_prewarm(
     state: &state::State,
     idle: bool,
 ) -> Option<state::Page> {
-    if !idle || state.dirty || view::recents_replaces_page(state) {
+    if !idle
+        || state.dirty
+        || view::recents_replaces_page(state)
+        || view::channel_switcher_replaces_page(state)
+    {
         return None;
     }
     prewarm.pop()
@@ -732,16 +793,18 @@ fn run() -> Result<(), String> {
     } else {
         storage::load(&preferences_path)?
     };
-    let public_update_checks = update::public_checks_enabled(
-        !options.script.is_empty(),
-        options.test_update_version.is_some(),
-    );
+    let public_update_checks = update::SELF_UPDATE
+        && update::public_checks_enabled(
+            !options.script.is_empty(),
+            options.test_update_version.is_some(),
+        );
     if webos && let Some(directory) = preferences_path.parent() {
         app_artwork::set_disk_cache(directory.join("icon-cache"));
         renderer::set_program_cache(directory.join("shader-cache"));
         preload::set_image_cache(directory.join("image-cache"));
     }
     let mut state = State::new(initial_preferences);
+    state.self_update = update::SELF_UPDATE;
     if let Some(version) = &options.test_update_version {
         eprintln!(
             "Luma update preview: simulated version {version}; public release check disabled"
@@ -754,6 +817,10 @@ fn run() -> Result<(), String> {
     // Scripted desktop captures must never open a server on the real LAN.
     let mut wallpaper_service =
         wallpapers::Service::new(&preferences_path, !webos && !options.script.is_empty())?;
+    if state.preferences.subtle_photo_gradient {
+        // Uploads from an older version; the worker handles this after its first catalog.
+        wallpaper_service.prepare_subtle();
+    }
     let mut tile_editor_service = tile_editor::Service::new(!webos && !options.script.is_empty())?;
     if options.test_extra_apps > 0 {
         eprintln!(
@@ -772,6 +839,13 @@ fn run() -> Result<(), String> {
         weather_service::Client::new(options.weather_test_server.as_deref())?,
         weather_cache,
     );
+    let tmdb_service =
+        tmdb_service::Service::new(tmdb_service::Client::new(), preferences_path.clone());
+    let mut disk = tmdb_service::load_cache(&tmdb_service::cache_file(&preferences_path));
+    tmdb_service::hydrate_cache(&mut disk, &tmdb_service::cache_dir(&preferences_path));
+    if !disk.items.is_empty() {
+        state.shelf.shows = disk.items;
+    }
     let updates = update::Worker::new(webos && public_update_checks);
     if webos && options.market_test_server.is_some() {
         return Err("Market test servers are only available in desktop builds".into());
@@ -792,6 +866,7 @@ fn run() -> Result<(), String> {
         &platform,
         &preferences_path,
         &weather_service,
+        &tmdb_service,
         &wallpaper_service,
         &webhook_service,
         &updates,
@@ -875,6 +950,11 @@ fn run() -> Result<(), String> {
     if let Some(mode) = &options.preload {
         eprintln!("Luma launch: preload={mode}; starting hidden until Home is launched");
     }
+    if webos && state.preferences.background == crate::model::LIVE_TV_BACKGROUND {
+        // Read by SDL-webOS when the window is created: webOS keeps live TV playing behind
+        // an overlay window, as it does for LG Home.
+        sdl2::hint::set("SDL_WEBOS_WINDOW_TYPE", "_WEBOS_WINDOW_TYPE_OVERLAY");
+    }
     let create_window = || {
         let mut builder = video.window("Luma", requested.width, requested.height);
         builder.opengl().allow_highdpi().position_centered();
@@ -948,6 +1028,7 @@ fn run() -> Result<(), String> {
     // Hidden pages are demand-loaded. Only the explicit diagnostic script action
     // queues preparation: doing it automatically blocks SDL input/lifecycle events.
     let mut prewarm: Vec<state::Page> = Vec::new();
+    let profile_finish = std::env::var("LUMA_PROFILE_FINISH").as_deref() == Ok("1");
     let verify_damage = std::env::var("LUMA_DAMAGE_VERIFY").as_deref() == Ok("1");
     // Partial frames: verified, mismatched, worst pixels, largest difference; full frames alike.
     let mut damage_report = (0usize, 0usize, 0usize, 0u8);
@@ -962,7 +1043,11 @@ fn run() -> Result<(), String> {
     let mut drawer_artwork: Option<std::sync::mpsc::Receiver<(String, Option<image::RgbaImage>)>> =
         None;
     let mut drawer_vectors: Vec<String> = Vec::new();
-    let mut idle_text: Vec<renderer::Draw> = Vec::new();
+    let mut decoded_icons = VecDeque::new();
+    let mut idle_text: VecDeque<renderer::Draw> = VecDeque::new();
+    let mut last_layer_area = state::Rect::default();
+    // After the idle queue has been filled and worked off (see drawer_artwork_due).
+    let mut layers_prepared = None;
     // When the app inventory last arrived: a Home relaunch already refreshes it, so the
     // window events that follow (Restored, FocusGained) need not ask again right away.
     let mut inventory_at: Option<Instant> = None;
@@ -1168,6 +1253,7 @@ fn run() -> Result<(), String> {
                         &platform,
                         &preferences_path,
                         &weather_service,
+                        &tmdb_service,
                         &wallpaper_service,
                         &webhook_service,
                         &updates,
@@ -1193,7 +1279,11 @@ fn run() -> Result<(), String> {
                 _ => {}
             }
         }
-        state.dirty |= assets.artwork.poll();
+        state.dirty |= assets.artwork.poll(|icon| {
+            if webos {
+                decoded_icons.push_back(std::sync::Arc::downgrade(icon));
+            }
+        });
         let unix = state::unix_now();
         let startup_cycle = wallpaper_cycle::startup_due(
             state.preferences.wallpaper_cycle,
@@ -1290,6 +1380,27 @@ fn run() -> Result<(), String> {
                             .filter(|app| crate::branding::for_key(&app.brand).is_none())
                             .filter_map(|app| app.icon.clone()),
                     );
+                    assets.artwork.prefetch(
+                        state
+                            .inventory
+                            .channels
+                            .iter()
+                            .filter_map(|channel| channel.icon.clone()),
+                    );
+                    let guide_ids: Vec<_> = if state.preferences.channel_favorites.is_empty() {
+                        state
+                            .inventory
+                            .channels
+                            .iter()
+                            .take(12)
+                            .map(|channel| channel.id.clone())
+                            .collect()
+                    } else {
+                        state.preferences.channel_favorites.clone()
+                    };
+                    if !guide_ids.is_empty() {
+                        platform.send(Request::RefreshChannelGuide(guide_ids));
+                    }
                     if initial_focus
                         && state.focus == Target::Nav(0)
                         && state.page == state::Page::Home
@@ -1297,6 +1408,12 @@ fn run() -> Result<(), String> {
                         state.focus = state.first_content();
                     }
                     initial_focus = false;
+                }
+                Response::ChannelGuide(Ok(programs)) => {
+                    state.set_channel_guide(programs);
+                }
+                Response::ChannelGuide(Err(error)) => {
+                    eprintln!("Luma channel guide: {error}");
                 }
                 Response::Inventory(Err(error)) => {
                     if let Some(delay) = state.inventory_failed(error) {
@@ -1333,10 +1450,27 @@ fn run() -> Result<(), String> {
                                 &platform,
                                 &preferences_path,
                                 &weather_service,
+                                &tmdb_service,
                                 &wallpaper_service,
                                 &webhook_service,
                                 &updates,
                             );
+                            // First successful tune unlocks apiadapter now-playing for the session.
+                            let guide_ids: Vec<_> =
+                                if state.preferences.channel_favorites.is_empty() {
+                                    state
+                                        .inventory
+                                        .channels
+                                        .iter()
+                                        .take(12)
+                                        .map(|channel| channel.id.clone())
+                                        .collect()
+                                } else {
+                                    state.preferences.channel_favorites.clone()
+                                };
+                            if !guide_ids.is_empty() {
+                                platform.send(Request::RefreshChannelGuide(guide_ids));
+                            }
                         }
                     }
                 }
@@ -1348,6 +1482,7 @@ fn run() -> Result<(), String> {
                         &platform,
                         &preferences_path,
                         &weather_service,
+                        &tmdb_service,
                         &wallpaper_service,
                         &webhook_service,
                         &updates,
@@ -1369,6 +1504,7 @@ fn run() -> Result<(), String> {
                             &platform,
                             &preferences_path,
                             &weather_service,
+                            &tmdb_service,
                             &wallpaper_service,
                             &webhook_service,
                             &updates,
@@ -1389,6 +1525,7 @@ fn run() -> Result<(), String> {
                         &platform,
                         &preferences_path,
                         &weather_service,
+                        &tmdb_service,
                         &wallpaper_service,
                         &webhook_service,
                         &updates,
@@ -1421,6 +1558,23 @@ fn run() -> Result<(), String> {
             visible,
             OffsetDateTime::now_utc().unix_timestamp(),
         );
+        while let Some(response) = tmdb_service.try_recv() {
+            state.shelf_response(response);
+        }
+        let shelf_pending = state.shelf_tick();
+        if !shelf_pending.is_empty() {
+            running &= effects(
+                shelf_pending,
+                &mut state,
+                &platform,
+                &preferences_path,
+                &weather_service,
+                &tmdb_service,
+                &wallpaper_service,
+                &webhook_service,
+                &updates,
+            );
+        }
         if std::mem::take(&mut state.update_check_requested) {
             if let Some(version) = &options.test_update_version {
                 state.update_response(Ok(
@@ -1666,7 +1820,10 @@ fn run() -> Result<(), String> {
                                 cue = Some(Cue::Back);
                             }
                         }
-                        Keycode::Up if !repeat || !state.recents_open() => {
+                        Keycode::Up
+                            if !repeat
+                                || (!state.recents_open() && !state.channel_switcher_open()) =>
+                        {
                             pending = state.direction(Direction::Up, &scene.controls);
                             cue = Some(Cue::Navigate);
                         }
@@ -1830,6 +1987,19 @@ fn run() -> Result<(), String> {
                     state.pointer = false;
                     state.dirty = true;
                 }
+                Event::MouseWheel { x, y, .. } if state.channel_switcher_open() => {
+                    press = None;
+                    let delta = if x != 0 { x } else { -y };
+                    if delta != 0 {
+                        pending = state.channel_switcher_direction(if delta > 0 {
+                            Direction::Right
+                        } else {
+                            Direction::Left
+                        });
+                    }
+                    state.pointer = false;
+                    state.dirty = true;
+                }
                 Event::MouseWheel {
                     x,
                     y,
@@ -1863,6 +2033,7 @@ fn run() -> Result<(), String> {
                 &platform,
                 &preferences_path,
                 &weather_service,
+                &tmdb_service,
                 &wallpaper_service,
                 &webhook_service,
                 &updates,
@@ -1901,6 +2072,7 @@ fn run() -> Result<(), String> {
                 &platform,
                 &preferences_path,
                 &weather_service,
+                &tmdb_service,
                 &wallpaper_service,
                 &webhook_service,
                 &updates,
@@ -1954,6 +2126,7 @@ fn run() -> Result<(), String> {
                     &platform,
                     &preferences_path,
                     &weather_service,
+                    &tmdb_service,
                     &wallpaper_service,
                     &webhook_service,
                     &updates,
@@ -2008,6 +2181,7 @@ fn run() -> Result<(), String> {
                 &platform,
                 &preferences_path,
                 &weather_service,
+                &tmdb_service,
                 &wallpaper_service,
                 &webhook_service,
                 &updates,
@@ -2032,6 +2206,7 @@ fn run() -> Result<(), String> {
             scene = compose(&mut state, &assets, now);
             let compose_ms = compose_started.elapsed().as_secs_f64() * 1000.;
             let (width, height) = window.drawable_size();
+            renderer.set_layers(&scene.layers);
             if width > 0 && height > 0 {
                 if final_frame && let Some(path) = &options.screenshot {
                     captured = Some(renderer.capture(
@@ -2040,11 +2215,29 @@ fn run() -> Result<(), String> {
                         options.capture_size.unwrap_or(Size::HD),
                     )?);
                 }
+                // A fading layer changes the pixels it covers without changing a command; so
+                // does its last frame give way to the commands drawn directly.
+                let layer_area = damage::area(
+                    scene
+                        .layers
+                        .iter()
+                        .flat_map(|layer| &scene.draw[layer.start..layer.end]),
+                );
+                let layered = damage::union(layer_area, last_layer_area);
+                last_layer_area = layer_area;
                 let damage = partial.as_ref().and_then(|partial| {
                     if last_drawable != Some(Size::new(width, height)) {
                         damage_tracker.reset();
                     }
-                    damage_tracker.push(&scene.draw);
+                    damage_tracker.include(layered);
+                    let clip_padding = 2. * (1920. / width as f32).max(1080. / height as f32);
+                    damage_tracker.compare(&scene.draw, clip_padding, |draw| {
+                        if renderer.stats().target == Size::new(width, height) {
+                            renderer.damage_bounds(draw)
+                        } else {
+                            damage::bounds(draw)
+                        }
+                    });
                     // A capture drew this frame already; keep its window frame whole.
                     if captured.is_some() && final_frame {
                         return None;
@@ -2057,6 +2250,8 @@ fn run() -> Result<(), String> {
                     }
                     damage
                 });
+                renderer.transparent =
+                    webos && state.preferences.background == crate::model::LIVE_TV_BACKGROUND;
                 renderer.render(&scene.draw, width, height, damage);
                 redrawn_total += renderer.stats().redrawn_fraction;
                 if verify_damage {
@@ -2082,6 +2277,13 @@ fn run() -> Result<(), String> {
                     report.2 = report.2.max(differing);
                     report.3 = report.3.max(largest);
                 }
+                let finish_ms = if profile_finish {
+                    let started = Instant::now();
+                    unsafe { gl::Finish() };
+                    started.elapsed().as_secs_f64() * 1000.
+                } else {
+                    0.
+                };
                 let swap_started = Instant::now();
                 window.gl_swap_window();
                 let swap_ms = swap_started.elapsed().as_secs_f64() * 1000.;
@@ -2127,6 +2329,7 @@ fn run() -> Result<(), String> {
                             compose_ms,
                             render_ms: renderer.stats().cpu_submission_ms,
                             swap_ms,
+                            finish_ms,
                             redrawn: renderer.stats().redrawn_fraction,
                             glyph_ms: renderer.stats().glyph_ms,
                             vector_ms: renderer.stats().vector_load_ms,
@@ -2146,6 +2349,9 @@ fn run() -> Result<(), String> {
                         );
                     }
                     last_drawable = Some(drawable);
+                }
+                if partial.is_some() {
+                    damage_tracker.remember(std::mem::take(&mut scene.draw));
                 }
             }
             state.dirty = false;
@@ -2179,7 +2385,20 @@ fn run() -> Result<(), String> {
                 damage::bounds,
             );
         }
+        if idle
+            && layers_prepared == Some(false)
+            && !damage_tracker.previous().is_empty()
+            && drawer_artwork.is_none()
+            && drawer_vectors.is_empty()
+            && idle_text.is_empty()
+        {
+            // Last in the idle queue: the offscreen layers of a first Recents crossfade.
+            let (width, height) = window.drawable_size();
+            renderer.prepare_layers(damage_tracker.previous(), width, height);
+            layers_prepared = Some(true);
+        }
         if std::mem::take(&mut drawer_artwork_due) {
+            layers_prepared.get_or_insert(false);
             let page = std::mem::replace(&mut state.page, state::Page::Apps);
             let visibility = std::mem::replace(&mut state.drawer_visibility, 1.);
             let section = state.section;
@@ -2219,17 +2438,18 @@ fn run() -> Result<(), String> {
             state.subpage = subpage;
             state.focus = focus;
             state.scroll = scroll;
-            idle_text = menu
-                .into_iter()
-                .filter(|draw| matches!(draw, renderer::Draw::Text(..)))
-                .chain(
-                    views
-                        .iter()
-                        .filter(|draw| matches!(draw, renderer::Draw::Text(..)))
-                        .cloned(),
-                )
-                .chain(subpage_labels)
-                .collect();
+            idle_text = view::initial_drawer_labels(&state, &assets).into();
+            idle_text.extend(
+                menu.into_iter()
+                    .filter(|draw| matches!(draw, renderer::Draw::Text(..)))
+                    .chain(
+                        views
+                            .iter()
+                            .filter(|draw| matches!(draw, renderer::Draw::Text(..)))
+                            .cloned(),
+                    )
+                    .chain(subpage_labels),
+            );
             let paths: Vec<String> = views
                 .iter()
                 .filter_map(|draw| match draw {
@@ -2262,6 +2482,12 @@ fn run() -> Result<(), String> {
         if idle {
             let started = Instant::now();
             while started.elapsed() < Duration::from_millis(4) {
+                if let Some(handle) = decoded_icons.pop_front() {
+                    if let Some(icon) = handle.upgrade() {
+                        renderer.prepare_app_image(&icon);
+                    }
+                    continue;
+                }
                 let image = match &drawer_artwork {
                     Some(receiver) => match receiver.try_recv() {
                         Ok(image) => Some(image),
@@ -2281,11 +2507,9 @@ fn run() -> Result<(), String> {
                 } else if !idle_text.is_empty() && !renderer.text_cache_has_room() {
                     // Further labels would evict the drawer's and sections' prepared ones.
                     idle_text.clear();
-                } else if !idle_text.is_empty() {
-                    // Text a few runs at a time: glyph outlines and run meshes.
-                    let chunk: Vec<_> = idle_text.drain(..idle_text.len().min(4)).collect();
+                } else if let Some(label) = idle_text.pop_front() {
                     let (width, height) = window.drawable_size();
-                    renderer.prepare(&chunk, width, height);
+                    renderer.prepare(std::slice::from_ref(&label), width, height);
                 } else {
                     break;
                 }
@@ -2323,7 +2547,11 @@ fn run() -> Result<(), String> {
             || assets.artwork.pending()
         {
             8
-        } else if drawer_artwork.is_some() || !drawer_vectors.is_empty() || !idle_text.is_empty() {
+        } else if !decoded_icons.is_empty()
+            || drawer_artwork.is_some()
+            || !drawer_vectors.is_empty()
+            || !idle_text.is_empty()
+        {
             16
         } else if !prewarm.is_empty() {
             500
@@ -2345,7 +2573,7 @@ fn run() -> Result<(), String> {
             "error": state.error, "scroll": state.scroll, "home_scroll": state.home_scroll, "subpage": state.subpage, "modal": state.overlay.is_some(), "weather": state.weather,
             "inventory": state.inventory.apps,
             "recents": state.recents.entries, "recents_pending": state.recents.pending, "recents_error": state.recents.error, "recents_visibility": state.recents.visibility,
-            "ui_text": scene.draw.iter().filter_map(|draw| match draw { renderer::Draw::Text(value, ..) => Some(value), _ => None }).collect::<Vec<_>>() });
+            "ui_text": (if partial.is_some() { damage_tracker.previous() } else { &scene.draw }).iter().filter_map(|draw| match draw { renderer::Draw::Text(value, ..) => Some(value), _ => None }).collect::<Vec<_>>() });
         std::fs::write(
             path,
             serde_json::to_vec_pretty(&state).map_err(|e| e.to_string())?,

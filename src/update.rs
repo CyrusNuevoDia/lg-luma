@@ -303,6 +303,9 @@ use std::{
     time::Instant,
 };
 
+/// This fork installs its own builds: on the TV it never checks for, offers or installs
+/// upstream releases. Desktop previews keep upstream's card, which cannot install.
+pub const SELF_UPDATE: bool = !cfg!(feature = "webos");
 pub const FEED: &str = "https://github.com/ecklf/lg-luma/releases/latest/download/repo.json";
 pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
 /// Only IPKs from this project's own release assets are installed.
