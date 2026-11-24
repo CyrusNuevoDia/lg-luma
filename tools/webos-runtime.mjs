@@ -7,10 +7,12 @@ import { pathToFileURL } from 'node:url';
 
 const root = path.resolve(import.meta.dirname, '..');
 const directory = path.join(root, '.build/sdl-webos');
-const release = 'release-2.30.12-webos.5';
-const filename = 'SDL2-2.30.12-webos.tar.gz';
-const archiveHash = '4ad566453d113bdd9ee96878176b97d28d9fa70503a62d83d55a351545abb334';
-const libraryHash = 'f564f7da624cec47168300d017f3ec822f41b5096f0ce1c96873eecd8614d446';
+// No SDL-webOS release has the SDL_WEBOS_WINDOW_TYPE hint yet (webosbrew/SDL-webOS#19, merged
+// after release-2.30.12-webos.8), which the Live TV background needs for its overlay window.
+// Releases are only built when published, so build that merge commit with the NDK instead.
+const commit = '50a17c0539ff26ef571cc05d7c703af59ae68332';
+const filename = `SDL-webOS-${commit}.tar.gz`;
+const archiveHash = 'e23567121840937f589db56afb51a1a3b54dcdab20ba8e98bddb9be8ee0f94d8';
 const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
 export function verifyWebosSdl(bytes) {
@@ -34,6 +36,50 @@ export function verifyWebosSdl(bytes) {
   }
 }
 
+function run(command, args, timeout) {
+  const result = spawnSync(command, args, { stdio: 'inherit', timeout });
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error(`SDL-webOS: ${command} failed.`);
+}
+
+// The flags of SDL-webOS's own release build (.github/workflows/webos.yml), standard SDL ABI.
+async function build(archive) {
+  const ndk = process.env.WEBOS_NDK && path.resolve(process.env.WEBOS_NDK);
+  const toolchain = ndk && path.join(ndk, 'share/buildroot/toolchainfile.cmake');
+  try {
+    await fs.access(toolchain);
+  } catch {
+    throw new Error('Building SDL-webOS needs WEBOS_NDK (run pnpm sdk) and cmake.');
+  }
+  const source = path.join(directory, 'source');
+  await fs.rm(source, { recursive: true, force: true });
+  await fs.mkdir(source);
+  run('tar', ['-xzf', archive, '-C', source, '--strip-components=1'], 60000);
+  const output = path.join(source, 'build');
+  run(
+    'cmake',
+    [
+      '-B',
+      output,
+      '-S',
+      source,
+      `-DCMAKE_TOOLCHAIN_FILE=${toolchain}`,
+      '-DCMAKE_BUILD_TYPE=Release',
+      '-DWEBOS=ON',
+      '-DSDL_OFFSCREEN=OFF',
+      '-DSDL_DISKAUDIO=OFF',
+      '-DSDL_DUMMYAUDIO=OFF',
+      '-DSDL_DUMMYVIDEO=OFF',
+      '-DSDL_KMSDRM=OFF',
+      '-DSDL_VENDOR_INFO=webOS Backport',
+      '-DSDL_WEBOS_BROKEN_ABI=OFF',
+    ],
+    300000,
+  );
+  run('cmake', ['--build', output, '--config', 'Release', '--parallel'], 1200000);
+  run('cmake', ['--install', output, '--prefix', directory], 120000);
+}
+
 export async function prepareWebosRuntime() {
   await fs.mkdir(directory, { recursive: true });
   const archive = path.join(directory, filename);
@@ -42,8 +88,8 @@ export async function prepareWebosRuntime() {
     bytes = await fs.readFile(archive);
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
-    console.log(`Downloading SDL-webOS ${release} (standard SDL ABI).`);
-    const url = `https://github.com/webosbrew/SDL-webOS/releases/download/${release}/${filename}`;
+    console.log(`Downloading SDL-webOS ${commit} (source).`);
+    const url = `https://github.com/webosbrew/SDL-webOS/archive/${commit}.tar.gz`;
     const response = await fetch(url, { signal: AbortSignal.timeout(60000) });
     if (!response.ok) throw new Error(`SDL-webOS download failed: ${response.status}`);
     bytes = Buffer.from(await response.arrayBuffer());
@@ -52,24 +98,20 @@ export async function prepareWebosRuntime() {
   }
   if (hash(bytes) !== archiveHash) throw new Error('SDL-webOS archive checksum mismatch.');
 
+  // The build is not reproducible bit for bit, so a stamp records which commit is installed.
   const library = path.join(directory, 'lib/libSDL2-2.0.so.0');
-  let current;
-  try {
-    current = await fs.readFile(library);
-  } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
+  const stamp = path.join(directory, 'commit');
+  const built = await fs.readFile(stamp, 'utf8').catch(() => '');
+  if (built !== commit || !(await fs.stat(library).catch(() => null))) {
+    await fs.rm(stamp, { force: true });
+    await build(archive);
+    await fs.writeFile(stamp, commit);
   }
-  if (!current || hash(current) !== libraryHash) {
-    const result = spawnSync('tar', ['-xzf', archive, '-C', directory], {
-      stdio: 'inherit',
-      timeout: 60000,
-    });
-    if (result.error) throw result.error;
-    if (result.status !== 0) throw new Error('SDL-webOS extraction failed.');
-    current = await fs.readFile(library);
-  }
-  if (hash(current) !== libraryHash) throw new Error('SDL-webOS library checksum mismatch.');
+  const current = await fs.readFile(library);
   verifyWebosSdl(current);
+  if (!current.includes(Buffer.from('SDL_WEBOS_WINDOW_TYPE\0'))) {
+    throw new Error('SDL-webOS lacks the SDL_WEBOS_WINDOW_TYPE hint. Remove .build/sdl-webos.');
+  }
 
   // Upstream metadata embeds /usr/local and an rpath. Generate relocatable build-host
   // lookup metadata instead; the TV executable keeps only its $ORIGIN/lib rpath.
@@ -87,7 +129,7 @@ Libs: -L\${libdir} -lSDL2
 Cflags: -I\${includedir} -D_REENTRANT
 `,
   );
-  console.log(`Verified SDL-webOS ${release}: ARM soft-float, Wayland/webOS backend.`);
+  console.log(`Verified SDL-webOS ${commit}: ARM soft-float, Wayland/webOS backend.`);
   return directory;
 }
 

@@ -20,8 +20,8 @@
   `Nintendo_Switch_2_logo_transparent_black.svg`, recoloured to `currentColor`; the marks belong to
   Nintendo. Spotify/Kodi symbol treatments use the original native
   artwork. Logos identify third-party apps; Luma is unaffiliated with their owners.
-- SDL-webOS 2.30.12 (`release-2.30.12-webos.5`, standard SDL ABI), zlib license.
-  `tools/webos-runtime.mjs` records archive/library SHA-256. Notice at `assets/licenses/sdl2.txt`.
+- SDL-webOS 2.30.12 (commit `50a17c0`, built from source, standard SDL ABI), zlib license.
+  `tools/webos-runtime.mjs` records the source archive SHA-256. Notice at `assets/licenses/sdl2.txt`.
 - QR Code generator (`qrcodegen`): Project Nayuki, MIT; `assets/licenses/qrcodegen.txt`.
 - Local interface discovery (`if-addrs`): MaidSafe.net limited and messense, MIT;
   `assets/licenses/if-addrs.txt`.

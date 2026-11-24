@@ -63,9 +63,10 @@ is enabled without changing the calling convention; the pinned compiler emits un
 warnings for those target switches. `src/webos-compat.rs` implements `getauxval` for the SDK's
 older libc by reading real kernel auxiliary values, used by Rust startup and TLS CPU detection.
 
-The NDK's SDL is a link-time stub with Wayland disabled. `tools/webos-runtime.mjs` instead pins
-SDL-webOS `release-2.30.12-webos.5`, standard SDL ABI, with archive/library SHA-256 verification.
-It is linked and packaged with runtime name `libSDL2-2.0.so.0`, loaded from `$ORIGIN/lib`.
+The NDK's SDL is a link-time stub with Wayland disabled. `tools/webos-runtime.mjs` instead builds
+SDL-webOS 2.30.12 at commit `50a17c0` with the NDK and cmake, standard SDL ABI, from a
+SHA-256-pinned source archive. That commit adds the `SDL_WEBOS_WINDOW_TYPE` hint the Live TV
+background needs; no release includes it yet. It is linked and packaged with runtime name `libSDL2-2.0.so.0`, loaded from `$ORIGIN/lib`.
 Desktop pkg-config paths are isolated from the ARM build. `WEBOS_NATIVE_LIBS` can point to
 explicitly selected ARM webOS shared libraries; SDL overrides must have a real webOS/Wayland
 backend. Avoid copying the whole SDK library directory or the TV's graphics drivers/libc.
@@ -1355,8 +1356,8 @@ permissions; check TV-menu startup, launching/reopening and remote/pointer behav
 versions. Its [library guide](https://www.webosbrew.org/develop/guides/library-version) maps
 internal releases to marketing names: 7/22, 8/23, 9/24, 10/25, 11/26. SDL-webOS's newer
 [`2.30.12-webos.6`](https://github.com/webosbrew/SDL-webOS/releases/tag/release-2.30.12-webos.6)
-reports hotplug verification on webOS 3.4, 4 and 10. That is subsystem evidence for a newer
-prerelease than the pinned `.5` library, not a full Luma compatibility guarantee.
+reports hotplug verification on webOS 3.4, 4 and 10. That is subsystem evidence for SDL-webOS itself, which the pinned
+commit includes, not a full Luma compatibility guarantee.
 
 ## Checks and CI
 
