@@ -3975,29 +3975,41 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
         }
         SYSTEM_SECTION => {
             let start = out.draw.len();
-            let rect = Rect::new(640., 164.8 - s, 1120., 220.);
-            let title = if matches!(state.update, crate::update::InstallStatus::Failed(_)) {
-                "updateError"
-            } else if state.available_update.is_some() {
-                "updateAvailable"
+            // Without self-update the card only names the installed version.
+            let (height, rows) = if state.self_update {
+                (220., 408.8)
             } else {
-                match state.update_status {
+                (130., 318.8)
+            };
+            let rect = Rect::new(640., 164.8 - s, 1120., height);
+            let title = if !state.self_update {
+                "Luma"
+            } else if matches!(state.update, crate::update::InstallStatus::Failed(_)) {
+                language.t("updateError")
+            } else if state.available_update.is_some() {
+                language.t("updateAvailable")
+            } else {
+                language.t(match state.update_status {
                     crate::update::Status::Unchecked => "checkForUpdates",
                     crate::update::Status::Checking => "checkingUpdates",
                     crate::update::Status::Checked => "latestVersionInstalled",
                     crate::update::Status::Failed => "updateCheckFailed",
-                }
+                })
             };
             settings_surface(out, rect, 20.);
             out.text(
-                language.t(title),
+                title,
                 Rect::new(rect.x + 24.2, rect.y + 24., rect.w - 48.4, 34.),
                 text(24., 550, -0.02).leading(1.4),
                 WHITE,
                 false,
             );
             out.text(
-                if let Some(latest) = &state.available_update {
+                if let Some(latest) = state
+                    .available_update
+                    .as_ref()
+                    .filter(|_| state.self_update)
+                {
                     language.format(
                         "updateVersions",
                         &[("current", assets.version.trim()), ("latest", latest)],
@@ -4010,29 +4022,31 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
                 c(0xeeeeee, 0.73),
                 false,
             );
-            row(
-                out,
-                state,
-                assets,
-                Row {
-                    target: if state.available_update.is_some() {
-                        Target::InstallUpdate
-                    } else {
-                        Target::CheckUpdates
+            if state.self_update {
+                row(
+                    out,
+                    state,
+                    assets,
+                    Row {
+                        target: if state.available_update.is_some() {
+                            Target::InstallUpdate
+                        } else {
+                            Target::CheckUpdates
+                        },
+                        rect: Rect::new(rect.x + 24., rect.y + 132., rect.w - 48., 64.),
+                        title: &update_value(state),
+                        icon: Some(if state.available_update.is_some() {
+                            "arrow"
+                        } else {
+                            "refresh"
+                        }),
+                        value: None,
+                        description: None,
+                        selected: false,
+                        chevron: false,
                     },
-                    rect: Rect::new(rect.x + 24., rect.y + 132., rect.w - 48., 64.),
-                    title: &update_value(state),
-                    icon: Some(if state.available_update.is_some() {
-                        "arrow"
-                    } else {
-                        "refresh"
-                    }),
-                    value: None,
-                    description: None,
-                    selected: false,
-                    chevron: false,
-                },
-            );
+                );
+            }
             for (position, (index, title, icon, value, chevron)) in [
                 (
                     7,
@@ -4071,8 +4085,7 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
                         },
                         rect: Rect::new(
                             640.,
-                            408.8
-                                + position as f32 * 84.
+                            rows + position as f32 * 84.
                                 + if position > 0 { 16. } else { 0. }
                                 + if position > 2 { 16. } else { 0. }
                                 - s,

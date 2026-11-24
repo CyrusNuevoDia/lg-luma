@@ -793,16 +793,18 @@ fn run() -> Result<(), String> {
     } else {
         storage::load(&preferences_path)?
     };
-    let public_update_checks = update::public_checks_enabled(
-        !options.script.is_empty(),
-        options.test_update_version.is_some(),
-    );
+    let public_update_checks = update::SELF_UPDATE
+        && update::public_checks_enabled(
+            !options.script.is_empty(),
+            options.test_update_version.is_some(),
+        );
     if webos && let Some(directory) = preferences_path.parent() {
         app_artwork::set_disk_cache(directory.join("icon-cache"));
         renderer::set_program_cache(directory.join("shader-cache"));
         preload::set_image_cache(directory.join("image-cache"));
     }
     let mut state = State::new(initial_preferences);
+    state.self_update = update::SELF_UPDATE;
     if let Some(version) = &options.test_update_version {
         eprintln!(
             "Luma update preview: simulated version {version}; public release check disabled"

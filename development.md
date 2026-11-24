@@ -1306,6 +1306,11 @@ runtime font/translation services or telemetry are used. Weather attribution: Op
 
 ## Update availability
 
+This fork installs its own builds, so `update::SELF_UPDATE` is off in TV builds (the `webos`
+feature): they never contact the release feed, the installer worker rejects every request, and
+**Settings → System** shows only the installed version. The rest of this section describes
+upstream's updater, which desktop previews still show.
+
 On interactive desktop or TV startup a separate worker checks
 `https://github.com/ecklf/lg-luma/releases/latest/download/repo.json` once per process automatically.
 **Settings → System → Check again** retries on the same worker, with one request in flight at a time.

@@ -308,6 +308,8 @@ pub struct State {
     pub uninstalling: Option<String>,
     pub notice: Option<(String, Instant)>,
     pub error: Option<String>,
+    /// Whether Settings offers the update action (see update::SELF_UPDATE).
+    pub self_update: bool,
     pub available_update: Option<String>,
     pub update_status: crate::update::Status,
     pub update_check_requested: bool,
@@ -374,6 +376,7 @@ impl State {
             uninstalling: None,
             notice: None,
             error: None,
+            self_update: true,
             available_update: None,
             update_status: crate::update::Status::Unchecked,
             update_check_requested: false,
@@ -1542,6 +1545,7 @@ impl State {
                 .map_or(Target::Sidebar(APPS_SECTION), |app| {
                     Target::App(app.id.clone())
                 }),
+            SYSTEM_SECTION if !self.self_update => Target::Setting(7),
             SYSTEM_SECTION if self.available_update.is_some() => Target::InstallUpdate,
             SYSTEM_SECTION => Target::CheckUpdates,
             _ => Target::Setting(1),

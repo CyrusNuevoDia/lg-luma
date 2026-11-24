@@ -1264,6 +1264,30 @@ fn system_version_is_inside_the_update_status_card_without_a_separate_row() {
 }
 
 #[test]
+fn without_self_update_the_system_card_only_shows_the_version() {
+    let mut state = ready();
+    state.self_update = false;
+    state.available_update = Some("99.0.0".into());
+    state.open(2);
+    state.section = crate::state::SYSTEM_SECTION;
+    state.panel_started = None;
+    let system = scene(&state);
+    assert!(
+        !system
+            .controls
+            .iter()
+            .any(|c| matches!(c.target, Target::CheckUpdates | Target::InstallUpdate))
+    );
+    assert!(system.draw.iter().any(|draw| matches!(
+        draw,
+        crate::renderer::Draw::Text(label, ..) if label == "Current version: test"
+    )));
+    state.focus = Target::Sidebar(crate::state::SYSTEM_SECTION);
+    state.direction(Direction::Right, &system.controls);
+    assert_eq!(state.focus, Target::Setting(7));
+}
+
+#[test]
 fn system_category_owns_refresh_and_quit_and_restores_sidebar_focus() {
     let mut state = ready();
     state.open(2);
