@@ -213,9 +213,9 @@ Boot log: `/var/lib/luma-home/boot.log`. See the
 [development guide](development.md#optional-native-home-integration) for implementation details.
 
 <details>
-<summary>Method for webOS 5 / 6 / 24</summary>
+<summary>Method for webOS 5 / 6 / 22 / 24</summary>
 
-On **webOS 5, 6 and 24**, SAM cannot reread a mounted Home manifest, so `home.sh enable` instead
+On **webOS 5, 6, 22 and 24**, `home.sh enable` uses the executable method instead of replacing the manifest. It
 bind-mounts Luma's executable over LG's `/usr/bin/com.webos.app.home`. LG's Home manifest stays
 in place and Luma registers with SAM itself, so the Home key brings the running Luma back instead
 of restarting it. The commands and the cold-boot hook are the same.

@@ -249,11 +249,15 @@ impl State {
     pub fn back_press(&mut self, long: bool) -> Vec<Effect> {
         use crate::{model::RecentAppsBehavior, state::Page};
         match (self.preferences.recent_apps_behavior, long) {
-            (RecentAppsBehavior::LongPress, true) => self.open_recents(),
+            // The channel switcher takes the gesture over a focused Home channel, also with
+            // Recent apps off (open_recents itself declines then).
+            (RecentAppsBehavior::LongPress | RecentAppsBehavior::Off, true) => {
+                self.open_back_overlay()
+            }
             (RecentAppsBehavior::ShortPress, false)
                 if self.page == Page::Home && self.overlay.is_none() && self.moving.is_none() =>
             {
-                self.open_recents()
+                self.open_back_overlay()
             }
             (_, false) => self.back(),
             _ => vec![],
