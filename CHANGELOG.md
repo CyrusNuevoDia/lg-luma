@@ -1,5 +1,31 @@
 # lg-luma
 
+## 3.14.0
+
+### Minor Changes
+
+- cb82af9: Add an LG tuner Channels strip on Home with Settings picker (including show/hide), logos, now/next EPG, and OK to tune. Short Back on a focused Home channel opens a Recents-style switcher; hold Back still opens Recents (or the switcher when a channel is focused).
+- aa88219: Add a Live TV background: Luma opens as an overlay over live TV or the current input, like LG Home, and Back on Home returns to the TV. Needs SDL-webOS with the SDL_WEBOS_WINDOW_TYPE hint.
+- a1a4ba0: Add a subtle gradient for uploaded photos: Background → Gradient now cycles On, Subtle and Off. Subtle darkens only the top and bottom of an uploaded photo, as much as that photo needs for white text, and leaves the rest untouched. Bundled backgrounds and the default are unchanged; older uploads get their subtle version in the background when it is first chosen.
+- d234645: Add a TMDB Top Shelf on Home (on by default) with optional API key override, streaming region and suggestion language. Reattach cached backdrop files after restart so shelves (including Stremio) do not stay on the gray fallback. Fade the backdrop out when focus leaves a mapped streaming app so the wallpaper returns. Keep title/overview clear of the Home channels strip. Make Stremio use weekly trending (with a short provider fallback), skip empty Amazon provider ids, and require watch monetization types so Top Shelf actually fills. Keep the dwell clock while visibility is 0 so fetches are not reset every frame. Dwell only before the first fetch; already-cached apps crossfade series→series when focus moves (no wallpaper dip).
+
+### Patch Changes
+
+- aa007ba: Reduce the CPU time needed to sort apps and compose the drawer while navigating.
+- 40ee6d4: Draw resting Liquid Glass faster on webOS 5 Mali TVs: the interior of glass over a single wallpaper is rendered once per wallpaper and then read with one texture lookup, while rims keep the full lens and highlight shading.
+- cb82af9: Open Live TV before tuning a channel, and fetch channel-guide now-playing off the launch worker so Home startup does not stall channel opens.
+- c337da1: Start the launcher faster by storing consecutive fallback glyphs with identical advance widths as ranges. Existing font metric files remain readable.
+- af1da29: Shorten the main-thread pause when Luma prepares a new shadow. GLES 3 TVs upload a single coverage channel for each shadow and reuse the existing white color when sampling it.
+- 7612746: Open and close Recent apps and fade in Settings subpages more smoothly on webOS TVs: a fading page is drawn once into an offscreen layer and then only its opacity changes, instead of drawing all its glass, shadows and text again in every frame.
+- 486d52c: Keep animated draw commands aligned when calculating partial redraw damage, and transfer ownership of the rendered scene to the damage tracker instead of cloning it.
+- 702f77d: Use the verified specialized paint shaders by default on the Mali-TDVX GLES 3.2 driver, while keeping the explicit environment override.
+- b3f7115: Handle native app lifecycle registration explicitly for ordinary and Home Chooser launches, returning to the Home scene on relaunch while preserving legacy LG Home takeover paths.
+- 858eacb: Reduce redraw work during app and settings navigation, reuse identical vector vertices, and prepare installed app icons and focus labels while the launcher is idle. Speed up transitions and stacked recent apps by simplifying common paint operations and skipping glass hidden behind opaque cards.
+- 8c23e3b: Keep fading Recent apps and Settings subpages aligned with their controls on non-16:9 drawables by sampling only the fitted viewport of each offscreen layer texture.
+- 55b5249: Keep the app drawer animation at 60 fps on webOS 5 TVs: the drawer grid now turns fully opaque at 70% of its motion, so the last frames take the opaque drawing path. Settings → App drawer → Smoother animation (on by default) restores the full-length fade when turned off.
+- d234645: Stop Top Shelf from busy-spinning the event loop when settled, and pace shelf fades on real frame time.
+- dadf3fe: Keep the drawer's fade at 60 fps more often on webOS 5 Mali TVs: translucent cards, shapes and app icons now draw their fully covered interior without the per-pixel edge distance, and app icons on a rounded or fading card no longer fall back to the general paint shader.
+
 ## 3.13.1
 
 ### Patch Changes
