@@ -609,7 +609,8 @@ try {
       favorites: [...beforeShortcut.favorites, 'custom.sandmann'],
     }),
   );
-  const shortcutsPage = `${widgetsPage},left,left,enter`;
+  // Toolbar: Shortcuts · Channels (#276) · Top Shelf (#277) · Reset · Add, focus starting on Add.
+  const shortcutsPage = `${widgetsPage},left,left,left,left,enter`;
   const shortcut = await scenario('shortcut-settings', shortcutsPage);
   assert.equal(shortcut.focus, 'TileEditor');
   assert.equal(shortcut.subpage, 'Shortcuts');
