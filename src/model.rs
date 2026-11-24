@@ -3,6 +3,9 @@ use crate::weather::{Location, Unit};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 
+/// Background that draws no image, so live TV or the current input shows through.
+/// Luma then opens as a webOS overlay window, which the TV keeps playing behind.
+pub const LIVE_TV_BACKGROUND: &str = "live-tv";
 pub const BACKGROUNDS: [(&str, &str); 1] = [("midnight", "Midnight")];
 pub const DEFAULT_BACKGROUND: &str = "midnight";
 
@@ -1127,7 +1130,8 @@ impl Preferences {
             }
             placed.push(widget);
         }
-        if !BACKGROUNDS.iter().any(|(id, _)| *id == self.background)
+        if self.background != LIVE_TV_BACKGROUND
+            && !BACKGROUNDS.iter().any(|(id, _)| *id == self.background)
             && !crate::wallpapers::valid_id(&self.background)
         {
             self.background = DEFAULT_BACKGROUND.into();

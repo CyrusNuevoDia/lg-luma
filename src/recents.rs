@@ -255,7 +255,11 @@ impl State {
                 self.open_back_overlay()
             }
             (RecentAppsBehavior::ShortPress, false)
-                if self.page == Page::Home && self.overlay.is_none() && self.moving.is_none() =>
+                if self.page == Page::Home
+                    && self.overlay.is_none()
+                    && self.moving.is_none()
+                    // Over live TV, Back on Home leaves Luma instead (see State::back).
+                    && self.preferences.background != crate::model::LIVE_TV_BACKGROUND =>
             {
                 self.open_back_overlay()
             }

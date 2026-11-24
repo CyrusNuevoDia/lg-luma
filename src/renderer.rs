@@ -585,6 +585,8 @@ pub struct Renderer {
     vector_program: GLuint,
     text_program: GLuint,
     text_embolden: f32,
+    /// Clear to transparent instead of the opaque base colour (live TV background).
+    pub transparent: bool,
     buffer: GLuint,
     vao: GLuint,
     /// Whether meshes have their own vertex array objects (see vector::use_vertex_arrays).
@@ -810,6 +812,7 @@ impl Renderer {
             vector_program,
             text_program,
             text_embolden,
+            transparent: false,
             buffer,
             vao,
             vertex_arrays,
@@ -2667,7 +2670,7 @@ impl Renderer {
         unsafe {
             gl::Viewport(0, 0, width as i32, height as i32);
             scissor(damage);
-            if transparent {
+            if transparent || self.transparent {
                 gl::ClearColor(0., 0., 0., 0.);
             } else {
                 gl::ClearColor(0.04, 0.04, 0.05, 1.);

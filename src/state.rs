@@ -1,8 +1,8 @@
 use crate::i18n::Language;
 use crate::model::{
     App, BACKGROUNDS, CUSTOM_TILE_PREFIX, CustomTile, HOME_GRID_CELLS, HOME_GRID_COLUMNS,
-    HomeWidget, INPUT_NAME_LIMIT, InputMode, Inventory, Preferences, WidgetPosition,
-    clean_input_name,
+    HomeWidget, INPUT_NAME_LIMIT, InputMode, Inventory, LIVE_TV_BACKGROUND, Preferences,
+    WidgetPosition, clean_input_name,
 };
 use crate::text_rendering::TextRendering;
 use crate::weather::{self, Unit};
@@ -1379,6 +1379,8 @@ impl State {
         let ids: Vec<_> = self
             .background_ids()
             .filter(|id| self.deleting_wallpaper.as_deref() != Some(*id))
+            // The window type is fixed at launch, so cycling cannot switch to live TV.
+            .filter(|id| *id != LIVE_TV_BACKGROUND)
             .map(str::to_owned)
             .collect();
         let next = crate::wallpaper_cycle::next(&ids, &self.preferences.background);
@@ -1414,10 +1416,14 @@ impl State {
                         .any(|deleted| deleted == id)
             })
             .chain(self.wallpapers.iter().map(|item| item.id.as_str()))
+            // Last, so the bundled and uploaded wallpapers keep their positions.
+            .chain(std::iter::once(LIVE_TV_BACKGROUND))
     }
 
     pub fn can_delete_background(&self, id: &str) -> bool {
-        id != self.preferences.background && self.background_ids().any(|known| known == id)
+        id != self.preferences.background
+            && id != LIVE_TV_BACKGROUND
+            && self.background_ids().any(|known| known == id)
     }
 
     fn background_target(&self, id: &str) -> Target {
@@ -4071,6 +4077,10 @@ impl State {
         // favorite still opens the channel switcher.
         if matches!(self.focus, Target::Channel(_)) && !self.home_channels().is_empty() {
             return self.open_channel_switcher();
+        }
+        if self.preferences.background == LIVE_TV_BACKGROUND {
+            // Over live TV, Back on Home leaves Luma like it leaves LG Home: the TV stays.
+            return vec![Effect::Quit];
         }
         vec![]
     }

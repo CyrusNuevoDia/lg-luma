@@ -3,7 +3,7 @@ use crate::{
     i18n::Language,
     model::{
         App, BACKGROUNDS, HOME_GRID_CELLS, HOME_GRID_COLUMNS, HOME_GRID_ROWS, HomeWidget, Input,
-        InputMode, WeatherIconStyle, WidgetPosition,
+        InputMode, LIVE_TV_BACKGROUND, WeatherIconStyle, WidgetPosition,
     },
     renderer::{Color, Draw, TextStyle, WHITE},
     state::{
@@ -559,14 +559,31 @@ pub fn channel_switcher_replaces_page(state: &State) -> bool {
 
 pub fn scene(state: &State, assets: &Assets, now: OffsetDateTime) -> Scene {
     let mut out = Scene::new();
-    if let Some((previous, start)) = &state.previous_background {
-        out.image(
-            assets.background(state, previous),
-            Rect::new(0., 0., 1920., 1080.),
-            0.,
-            false,
-        );
+    let current = state.preferences.background.as_str();
+    if current == LIVE_TV_BACKGROUND {
+        // Nothing behind the UI: the renderer clears to transparent and the TV shows through.
+        if let Some((previous, start)) = &state.previous_background
+            && previous != LIVE_TV_BACKGROUND
+        {
+            let alpha = (start.elapsed().as_secs_f32() / state.background_fade).min(1.);
+            out.draw.push(Draw::TintedImage(
+                assets.background(state, previous),
+                Rect::new(0., 0., 1920., 1080.),
+                0.,
+                false,
+                [1., 1., 1., 1. - alpha],
+            ));
+        }
+    } else if let Some((previous, start)) = &state.previous_background {
         let alpha = (start.elapsed().as_secs_f32() / state.background_fade).min(1.);
+        if previous != LIVE_TV_BACKGROUND {
+            out.image(
+                assets.background(state, previous),
+                Rect::new(0., 0., 1920., 1080.),
+                0.,
+                false,
+            );
+        }
         out.draw.push(Draw::TintedImage(
             assets.background(state, &state.preferences.background),
             Rect::new(0., 0., 1920., 1080.),
@@ -3852,15 +3869,28 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
                     202.5,
                 );
                 out.shadow(rect, 16., 15., 3., 0.13);
-                out.image(
-                    custom.map_or_else(
-                        || assets.path(format!("thumbnails/{id}.jpg")),
-                        |item| item.thumbnail(),
-                    ),
-                    rect,
-                    16.,
-                    false,
-                );
+                if id == LIVE_TV_BACKGROUND {
+                    out.shape(rect, 16., c(0x192a43, 1.));
+                    let icon = Rect::new(rect.x + rect.w / 2. - 32., rect.y + 52., 64., 64.);
+                    out.icon(assets, "tv", icon, c(0xf3f3f3, 1.));
+                    out.text(
+                        state.preferences.language.t("liveTV"),
+                        Rect::new(rect.x, rect.y + 132., rect.w, 40.),
+                        text(26., 600, 0.),
+                        c(0xf3f3f3, 1.),
+                        true,
+                    );
+                } else {
+                    out.image(
+                        custom.map_or_else(
+                            || assets.path(format!("thumbnails/{id}.jpg")),
+                            |item| item.thumbnail(),
+                        ),
+                        rect,
+                        16.,
+                        false,
+                    );
+                }
                 out.border(rect, 16., 1., c(0xffffff, 0.086));
                 if state.preferences.background == id {
                     out.border(rect.inset(-2.), 18., 2., c(0xdedede, 1.));
@@ -4407,7 +4437,10 @@ fn widget_grid(out: &mut Scene, state: &State, assets: &Assets, moving: Option<H
             || assets.path(format!("wallpapers/{}.jpg", state.preferences.background)),
             |item| item.image(),
         );
-    out.image(background, preview, 20., false);
+    // Live TV has no image; the preview keeps its scrim.
+    if state.preferences.background != LIVE_TV_BACKGROUND {
+        out.image(background, preview, 20., false);
+    }
     out.shape(preview, 20., c(0x111519, 0.35));
     let scale = preview.w / 1920.;
     let map = |rect: Rect| {
