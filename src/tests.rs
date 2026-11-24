@@ -57,6 +57,29 @@ fn animations_are_paced_when_vsync_is_unavailable() {
 }
 
 #[test]
+fn idle_preparation_keeps_drawer_names_and_options_menu_labels() {
+    use crate::renderer::Draw;
+    let mut state = ready();
+    state.preferences.show_drawer_app_names = true;
+    let assets = view::Assets {
+        root: PathBuf::new(),
+        version: "test".into(),
+        metrics: BTreeMap::new(),
+        artwork: crate::app_artwork::Service::new(false),
+    };
+    let labels = view::initial_drawer_labels(&state, &assets);
+    assert_eq!(labels.len(), state.drawer_apps().len().min(24));
+    assert!(labels.iter().all(|draw| matches!(draw, Draw::Text(..))));
+    let menu = view::options_menu_draws(&state, &assets);
+    for key in ["open", "addFavorite", "hideApp", "deleteApp"] {
+        assert!(menu.iter().any(|draw| matches!(draw, Draw::Text(value, ..) if value == state.preferences.language.t(key))));
+    }
+    state.preferences.show_drawer_app_names = false;
+    assert!(view::initial_drawer_labels(&state, &assets).is_empty());
+    assert!(!view::options_menu_draws(&state, &assets).is_empty());
+}
+
+#[test]
 fn tv_app_and_device_settings_launches_are_quiet_and_guarded() {
     for id in ["netflix", "com.palm.app.settings"] {
         let mut state = ready();
